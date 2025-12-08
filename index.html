@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Quantum Relay Chess - p5.js Prototype</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+</head>
+<body>
+<script>
+/*
+  Quantum Relay Chess - p5.js prototype
+
+  Controls:
+    - Click your own piece to select it.
+    - Click a highlighted square to:
+        • Move there (normal move), or
+        • Relay-move there (if it's reachable via primed squares), or
+        • Prime it (if in Prime Mode).
+    - Press 'P' to toggle Prime Mode on/off.
+
+  Simplifications in this prototype:
+    - No check / checkmate detection (game doesn’t enforce check rules).
+    - Relay moves implemented for: rook, bishop, queen, knight.
+    - Pawn & king do NOT relay yet.
+    - Primed squares are consumed along the used relay path.
+*/
+
+const BOARD_SIZE = 8;
+const BOARD_PIXELS = 640;
+const LABEL_MARGIN = 18;
+const SIDEBAR_WIDTH = 200;
+const BOARD_ORIGIN_X = LABEL_MARGIN;
+const BOARD_ORIGIN_Y = LABEL_MARGIN;
+let tileSize;
+let board;        // [row][col] = piece or null
+let primed;       // [row][col] = { color: 'white'|'black', charge: 1 } or null
+let currentPlayer = 'white';
+let selectedPiece = null;
+let legalTargets = [];   // array of {row, col, type: 'move' | 'relay' | 'prime'}
+let primeMode = false;
+let moveLog = [];
+let lastSliderSearch = null;
+
+class Piece {
+  constructor(type, color, row, col) {
+    this.type = type;   // 'P','R','N','B','Q','K'
+    this.color = color; // 'white' or 'black'
+    this.row = row;
+    this.col = col;
+  }
+}
+
+function setup() {
+  createCanvas(BOARD_ORIGIN_X + BOARD_PIXELS + SIDEBAR_WIDTH, BOARD_ORIGIN_Y + BOARD_PIXELS + LABEL_MARGIN);
+  tileSize = BOARD_PIXELS / BOARD_SIZE;
+  initGame();
+}
+
+function initGame() {
+  board = [];
+  primed = [];
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    board[r] = [];
+    primed[r] = [];
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      board[r][c] = null;
+      primed[r][c] = null;
+    }
+  }
+
+  // Setup standard chess starting position
+  // White pieces (bottom)
+  placePiece(new Piece('R', 'white', 7, 0));
+  placePiece(new Piece('N', 'white', 7, 1));
+  placePiece(new Piece('B', 'white', 7, 2));
+  placePiece(new Piece('Q', 'white', 7, 3));
+  placePiece(new Piece('K', 'white', 7, 4));
+  placePiece(new Piece('B', 'white', 7, 5));
+  placePiece(new Piece('N', 'white', 7, 6));
+  placePiece(new Piece('R', 'white', 7, 7));
+  for (let c = 0; c < BOARD_SIZE; c++) {
+    placePiece(new Piece('P', 'white', 6, c));
+  }
+
+  // Black pieces (top)
+  placePiece(new Piece('R', 'black', 0, 0));
+  placePiece(new Piece('N', 'black', 0, 1));
+  placePiece(new Piece('B', 'black', 0, 2));
+  placePiece(new Piece('Q', 'black', 0, 3));
+  placePiece(new Piece('K', 'black', 0, 4));
+  placePiece(new Piece('B', 'black', 0, 5));
+  placePiece(new Piece('N', 'black', 0, 6));
+  placePiece(new Piece('R', 'black', 0, 7));
+  for (let c = 0; c < BOARD_SIZE; c++) {
+    placePiece(new Piece('P', 'black', 1, c));
+  }
+
+  currentPlayer = 'white';
+  selectedPiece = null;
+  legalTargets = [];
+}
+
+function placePiece(piece) {
+  board[piece.row][piece.col] = piece;
+}
+
+function draw() {
+  background(220);
+  drawBoard();
+  drawPrimedSquares();
+  drawPieces();
+  drawHighlights();
+  drawCoordinates();
+  drawUIOverlay();
+}
+
+function drawBoard() {
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      let light = (r + c) % 2 === 0;
+      if (light) fill(240);
+      else fill(100, 130, 180);
+      noStroke();
+      rect(BOARD_ORIGIN_X + c * tileSize, BOARD_ORIGIN_Y + r * tileSize, tileSize, tileSize);
+    }
+  }
+}
+
+function drawPrimedSquares() {
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      let p = primed[r][c];
+      if (p) {
+        if (p.color === 'white') fill(100, 180, 255, 140); // light blue
+        else fill(255, 120, 120, 140); // light red
+        noStroke();
+        rect(BOARD_ORIGIN_X + c * tileSize, BOARD_ORIGIN_Y + r * tileSize, tileSize, tileSize);
+
+        // Small charge indicator
+        fill(0);
+        textSize(tileSize * 0.25);
+        textAlign(RIGHT, TOP);
+        text(p.charge || 1, BOARD_ORIGIN_X + (c + 1) * tileSize - 4, BOARD_ORIGIN_Y + r * tileSize + 4);
+      }
+    }
+  }
+}
+
+function drawPieces() {
+  textAlign(CENTER, CENTER);
+  textSize(tileSize * 0.6);
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      let piece = board[r][c];
+      if (piece) {
+        if (piece.color === 'white') fill(255);
+        else fill(20);
+        stroke(0);
+        strokeWeight(2);
+        // draw circle
+        ellipse(
+          BOARD_ORIGIN_X + c * tileSize + tileSize / 2,
+          BOARD_ORIGIN_Y + r * tileSize + tileSize / 2,
+          tileSize * 0.8
+        );
+        // draw letter
+        if (piece.color === 'white') fill(0);
+        else fill(255);
+        noStroke();
+        text(piece.type, BOARD_ORIGIN_X + c * tileSize + tileSize / 2, BOARD_ORIGIN_Y + r * tileSize + tileSize / 2);
+      }
+    }
+  }
+}
+
+function drawHighlights() {
+  if (selectedPiece) {
+    // Highlight selected piece
+    noFill();
+    stroke(255, 255, 0);
+    strokeWeight(4);
+    rect(
+      BOARD_ORIGIN_X + selectedPiece.col * tileSize,
+      BOARD_ORIGIN_Y + selectedPiece.row * tileSize,
+      tileSize,
+      tileSize
+    );
+  }
+
+  // Highlight legal target squares
+  for (let t of legalTargets) {
+    if (t.type === 'move') {
+      noFill();
+      stroke(0, 255, 0);
+      strokeWeight(3);
+      rect(BOARD_ORIGIN_X + t.col * tileSize, BOARD_ORIGIN_Y + t.row * tileSize, tileSize, tileSize);
+    } else if (t.type === 'relay') {
+      noFill();
+      stroke(255, 165, 0);
+      strokeWeight(3);
+      rect(BOARD_ORIGIN_X + t.col * tileSize, BOARD_ORIGIN_Y + t.row * tileSize, tileSize, tileSize);
+    } else if (t.type === 'prime') {
+      noFill();
+      stroke(0, 200, 255);
+      strokeWeight(3);
+      rect(BOARD_ORIGIN_X + t.col * tileSize, BOARD_ORIGIN_Y + t.row * tileSize, tileSize, tileSize);
+    }
+  }
+}
+
+function drawCoordinates() {
+  fill(0, 120);
+  noStroke();
+  textAlign(CENTER, BOTTOM);
+  textSize(12);
+  for (let c = 0; c < BOARD_SIZE; c++) {
+    let file = String.fromCharCode("a".charCodeAt(0) + c);
+    text(file, BOARD_ORIGIN_X + c * tileSize + tileSize / 2, BOARD_ORIGIN_Y + BOARD_PIXELS + LABEL_MARGIN - 4);
+  }
+  textAlign(RIGHT, CENTER);
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    let rank = (BOARD_SIZE - r).toString();
+    text(rank, BOARD_ORIGIN_X - 4, BOARD_ORIGIN_Y + r * tileSize + tileSize / 2);
+  }
+}
+
+function drawUIOverlay() {
+  // Sidebar background
+  noStroke();
+  fill(30, 30, 30, 200);
+  rect(BOARD_ORIGIN_X + BOARD_PIXELS, 0, SIDEBAR_WIDTH, height);
+
+  fill(255);
+  textAlign(LEFT, TOP);
+  textSize(14);
+  let modeText = primeMode ? "Prime Mode (P to switch)" : "Move Mode (P to switch)";
+  let turnText = "Turn: " + (currentPlayer === 'white' ? "White" : "Black");
+  let primeSummary = getPrimeSummary();
+  text(turnText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 10);
+  text(modeText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 28);
+  text(primeSummary, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 46);
+
+  drawMoveLog();
+}
+
+function mousePressed() {
+  let col = floor((mouseX - BOARD_ORIGIN_X) / tileSize);
+  let row = floor((mouseY - BOARD_ORIGIN_Y) / tileSize);
+  if (
+    col < 0 || col >= BOARD_SIZE ||
+    row < 0 || row >= BOARD_SIZE
+  ) {
+    return;
+  }
+
+  let clickedPiece = board[row][col];
+
+  // If we have a selection and clicked on a legal target square, execute that.
+  let target = null;
+
+  if (selectedPiece) {
+    if (primeMode) {
+      // In prime mode, prefer PRIME targets on this square
+      target = legalTargets.find(
+        t => t.row === row && t.col === col && t.type === 'prime'
+      ) || legalTargets.find(
+        t => t.row === row && t.col === col
+      );
+    } else {
+      // Normal behavior: any legal target
+      target = legalTargets.find(t => t.row === row && t.col === col);
+    }
+  }
+
+  if (selectedPiece && target) {
+    if (target.type === 'move') {
+      doMove(selectedPiece, row, col);
+    } else if (target.type === 'prime') {
+      doPrime(selectedPiece, row, col);
+    } else if (target.type === 'relay') {
+      doRelayMove(selectedPiece, row, col);
+    }
+    selectedPiece = null;
+    legalTargets = [];
+    return;
+  }
+
+  // Otherwise, either select a piece or clear selection.
+  if (clickedPiece && clickedPiece.color === currentPlayer) {
+    selectedPiece = clickedPiece;
+    computeLegalTargets();
+  } else {
+    selectedPiece = null;
+    legalTargets = [];
+  }
+}
+
+
+function keyPressed() {
+  if (key === 'p' || key === 'P') {
+    primeMode = !primeMode;
+    if (selectedPiece) computeLegalTargets();
+  }
+}
+
+/* --- Move / Prime / Relay logic --- */
+
+function doMove(piece, destRow, destCol) {
+  // normal move, capture if enemy there
+  board[piece.row][piece.col] = null;
+  let targetPiece = board[destRow][destCol];
+  if (targetPiece) {
+    // captured piece simply removed
+  }
+  logAction(piece, destRow, destCol, "move", targetPiece);
+  piece.row = destRow;
+  piece.col = destCol;
+  board[destRow][destCol] = piece;
+
+  endTurn();
+}
+
+function doPrime(piece, destRow, destCol) {
+  // Mark dest square as primed for current player
+  primed[destRow][destCol] = {
+    color: currentPlayer,
+    charge: 1
+  };
+  // Overwriting (same or opposite color) just replaces it, we’re ignoring multi-charge for now.
+  logAction(piece, destRow, destCol, "prime");
+
+  // After priming, drop back to move mode to avoid accidental re-priming next turn.
+  primeMode = false;
+
+  endTurn();
+}
+
+function doRelayMove(piece, destRow, destCol) {
+  // We need to consume primed squares along the path.
+  // For sliding pieces: path is straight; for knights: we reconstruct BFS path.
+
+  // Determine path and consume primed squares.
+  let path = getRelayPath(piece, destRow, destCol);
+  if (!path) {
+    // Shouldn't happen if we computed targets correctly, but sanity check.
+    console.warn("No relay path found (unexpected).");
+    return;
+  }
+
+  // Clear primed squares on the path (including destination if it was primed).
+  console.log("Relay move path to clear:", path.map(p => keyFor(p.row, p.col)));
+  for (let sq of path) {
+    if (primed[sq.row][sq.col]) {
+      console.log("Clearing prime at", keyFor(sq.row, sq.col));
+    }
+    primed[sq.row][sq.col] = null;
+  }
+
+  // Move piece
+  board[piece.row][piece.col] = null;
+  let targetPiece = board[destRow][destCol];
+  if (targetPiece && targetPiece.color !== piece.color) {
+    // capture
+  }
+  logAction(piece, destRow, destCol, "relay", targetPiece, path);
+  piece.row = destRow;
+  piece.col = destCol;
+  board[destRow][destCol] = piece;
+
+  endTurn();
+}
+
+function endTurn() {
+  currentPlayer = (currentPlayer === 'white') ? 'black' : 'white';
+}
+
+/* --- Legal target generation --- */
+
+function computeLegalTargets() {
+  legalTargets = [];
+  if (!selectedPiece) return;
+
+  let piece = selectedPiece;
+  lastSliderSearch = null;
+
+  // Standard moves (including captures)
+  let moves = getStandardMoves(piece);
+  for (let m of moves) {
+    legalTargets.push({
+      row: m.row,
+      col: m.col,
+      type: 'move'
+    });
+  }
+
+  // Prime targets: only empty squares reachable by standard move
+  if (primeMode) {
+    for (let m of moves) {
+      if (!board[m.row][m.col]) {
+        legalTargets.push({
+          row: m.row,
+          col: m.col,
+          type: 'prime'
+        });
+      }
+    }
+  }
+
+  // Relay targets: depends on piece type
+  let relayTargets = getRelayTargets(piece);
+  for (let m of relayTargets) {
+    legalTargets.push({
+      row: m.row,
+      col: m.col,
+      type: 'relay'
+    });
+  }
+
+  // If prime mode is off, make sure primed squares do not block normal movement;
+  // standard move generation already ignores primes, but we keep targets distinct.
+  legalTargets = dedupeTargets(legalTargets);
+}
+
+/* --- Standard chess-like moves (no castling/en passant) --- */
+
+function getStandardMoves(piece) {
+  let moves = [];
+  let r = piece.row;
+  let c = piece.col;
+  let color = piece.color;
+
+  if (piece.type === 'P') {
+    let dir = (color === 'white') ? -1 : 1;
+    let startRow = (color === 'white') ? 6 : 1;
+
+    // Forward
+    let r1 = r + dir;
+    if (inBounds(r1, c) && !board[r1][c]) {
+      moves.push({ row: r1, col: c });
+      // Double move
+      if (r === startRow) {
+        let r2 = r + 2 * dir;
+        if (inBounds(r2, c) && !board[r2][c]) {
+          moves.push({ row: r2, col: c });
+        }
+      }
+    }
+
+    // Captures
+    for (let dc of [-1, 1]) {
+      let rr = r + dir;
+      let cc = c + dc;
+      if (inBounds(rr, cc) && board[rr][cc] && board[rr][cc].color !== color) {
+        moves.push({ row: rr, col: cc });
+      }
+    }
+
+  } else if (piece.type === 'R') {
+    moves.push(...slideMoves(r, c, color, [[1,0],[-1,0],[0,1],[0,-1]]));
+  } else if (piece.type === 'B') {
+    moves.push(...slideMoves(r, c, color, [[1,1],[1,-1],[-1,1],[-1,-1]]));
+  } else if (piece.type === 'Q') {
+    moves.push(...slideMoves(r, c, color, [
+      [1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]
+    ]));
+  } else if (piece.type === 'N') {
+    let knightDeltas = [
+      [2,1],[2,-1],[-2,1],[-2,-1],
+      [1,2],[1,-2],[-1,2],[-1,-2]
+    ];
+    for (let d of knightDeltas) {
+      let rr = r + d[0];
+      let cc = c + d[1];
+      if (!inBounds(rr, cc)) continue;
+      if (!board[rr][cc] || board[rr][cc].color !== color) {
+        moves.push({ row: rr, col: cc });
+      }
+    }
+  } else if (piece.type === 'K') {
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        if (dr === 0 && dc === 0) continue;
+        let rr = r + dr;
+        let cc = c + dc;
+        if (!inBounds(rr, cc)) continue;
+        if (!board[rr][cc] || board[rr][cc].color !== color) {
+          moves.push({ row: rr, col: cc });
+        }
+      }
+    }
+  }
+
+  return moves;
+}
+
+function slideMoves(r, c, color, directions) {
+  let moves = [];
+  for (let d of directions) {
+    let dr = d[0];
+    let dc = d[1];
+    let rr = r + dr;
+    let cc = c + dc;
+    while (inBounds(rr, cc)) {
+      if (!board[rr][cc]) {
+        moves.push({ row: rr, col: cc });
+      } else {
+        if (board[rr][cc].color !== color) {
+          moves.push({ row: rr, col: cc }); // capture
+        }
+        break;
+      }
+      rr += dr;
+      cc += dc;
+    }
+  }
+  return moves;
+}
+
+/* --- Relay targets --- */
+
+function getRelayTargets(piece) {
+  // For this prototype:
+  //   R, B, Q: chain through your primed squares; can pivot at any primed node (queen can pivot to any of its 8 dirs)
+  //   N: BFS chaining through primed knight-squares; destination may be unprimed but chain must include at least one primed square
+  //   P, K: no relay
+  let r = piece.row;
+  let c = piece.col;
+  let color = piece.color;
+  let results = [];
+
+  if (piece.type === 'R' || piece.type === 'B' || piece.type === 'Q') {
+    let search = sliderRelaySearch(piece);
+    results.push(...search.targets);
+    lastSliderSearch = search; // cache for path reconstruction
+  } else if (piece.type === 'N') {
+    // BFS over primed squares; destination can be unprimed but path must use at least one primed square.
+    let queue = [{ row: r, col: c, usedPrime: false }];
+    let visited = new Set(); // key + usedPrime flag
+    let knightDeltas = [
+      [2,1],[2,-1],[-2,1],[-2,-1],
+      [1,2],[1,-2],[-1,2],[-1,-2]
+    ];
+
+    function visitKey(row, col, usedPrime) {
+      return `${row},${col},${usedPrime ? 1 : 0}`;
+    }
+
+    visited.add(visitKey(r, c, false));
+
+    while (queue.length > 0) {
+      let cur = queue.shift();
+
+      for (let d of knightDeltas) {
+        let rr = cur.row + d[0];
+        let cc = cur.col + d[1];
+        if (!inBounds(rr, cc)) continue;
+
+        let cellPrime = primed[rr][cc];
+        let cellPiece = board[rr][cc];
+        let nextUsedPrime = cur.usedPrime || (cellPrime && cellPrime.color === color);
+
+        // If we have used at least one primed square in the chain, this is a relay landing spot.
+        if (nextUsedPrime && (!cellPiece || cellPiece.color !== color)) {
+          results.push({ row: rr, col: cc });
+        }
+
+        // Continue BFS only through primed squares of ours.
+        if (cellPrime && cellPrime.color === color) {
+          let key = visitKey(rr, cc, true);
+          if (!visited.has(key)) {
+            visited.add(key);
+            queue.push({ row: rr, col: cc, usedPrime: true });
+          }
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
+/* --- Relay path reconstruction --- */
+
+function getRelayPath(piece, destRow, destCol) {
+  // For sliders, path is straight line from piece to dest; all squares must be primed.
+  // For knights, we do BFS with parents and reconstruct.
+
+  if (piece.type === 'R' || piece.type === 'B' || piece.type === 'Q') {
+    let search = lastSliderSearch || sliderRelaySearch(piece);
+    return sliderRelayPath(search, piece, destRow, destCol);
+
+  } else if (piece.type === 'N') {
+    // BFS with parents; edges only through our primed squares; destination may be unprimed if a primed square was used.
+    let color = piece.color;
+    let startKey = keyFor(piece.row, piece.col);
+    let startState = `${startKey},0`;
+    let targetKey = keyFor(destRow, destCol);
+    let parents = {};
+    let visited = new Set();
+    let queue = [{ row: piece.row, col: piece.col, usedPrime: false, stateKey: startState }];
+    visited.add(startState);
+    let knightDeltas = [
+      [2,1],[2,-1],[-2,1],[-2,-1],
+      [1,2],[1,-2],[-1,2],[-1,-2]
+    ];
+
+    while (queue.length > 0) {
+      let cur = queue.shift();
+      console.log("Knight BFS visiting", cur);
+      for (let d of knightDeltas) {
+        let rr = cur.row + d[0];
+        let cc = cur.col + d[1];
+        if (!inBounds(rr, cc)) continue;
+        let k = keyFor(rr, cc);
+        let cellPrime = primed[rr][cc];
+        let isPrime = cellPrime && cellPrime.color === color;
+        let nextUsedPrime = cur.usedPrime || isPrime;
+
+        // Destination check (can be unprimed) if we've used at least one prime.
+        if (k === targetKey && nextUsedPrime) {
+          let destStateKey = `${k},${nextUsedPrime ? 1 : 0}`;
+          parents[destStateKey] = cur.stateKey;
+          console.log("Knight destination reached, reconstructing via state", destStateKey);
+          return reconstructKnightPrimedPath(destStateKey, startState, parents, color);
+        }
+
+        // Only traverse through our primed squares.
+        if (!isPrime) continue;
+        let nextStateKey = `${k},1`;
+        if (visited.has(nextStateKey)) continue;
+        visited.add(nextStateKey);
+        parents[nextStateKey] = cur.stateKey;
+        console.log("Knight enqueue", { row: rr, col: cc, usedPrime: true, stateKey: nextStateKey });
+        queue.push({ row: rr, col: cc, usedPrime: true, stateKey: nextStateKey });
+      }
+    }
+
+    return null;
+  }
+
+  return null;
+}
+
+/* --- UI helpers --- */
+
+function getPrimeSummary() {
+  let white = 0;
+  let black = 0;
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      let p = primed[r][c];
+      if (!p) continue;
+      if (p.color === 'white') white++;
+      else black++;
+    }
+  }
+  return `Primed W:${white} B:${black}`;
+}
+
+function drawMoveLog() {
+  let logHeight = 200;
+  let logWidth = SIDEBAR_WIDTH - 20;
+  let x = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
+  let y = 80;
+  fill(0, 180);
+  noStroke();
+  rect(x, y, logWidth, logHeight, 6);
+
+  fill(255);
+  textAlign(LEFT, TOP);
+  textSize(12);
+  text("Move Log", x + 8, y + 6);
+
+  let startY = y + 22;
+  let visible = moveLog.slice(-10); // last entries
+  for (let i = 0; i < visible.length; i++) {
+    text(visible[i], x + 8, startY + i * 16);
+  }
+}
+
+function logAction(piece, destRow, destCol, kind, capturedPiece = null, path = null) {
+  let actor = (piece.color === 'white') ? "W" : "B";
+  let moveText = `${actor}${piece.type} ${kind === 'prime' ? 'primes' : 'to'} ${squareName(destRow, destCol)}`;
+  if (kind === 'relay') moveText = `${actor}${piece.type} relay-> ${squareName(destRow, destCol)}`;
+  if (capturedPiece) moveText += ` x${capturedPiece.type}`;
+  if (path && path.length > 0 && kind === 'relay') {
+    let used = path.map(sq => squareName(sq.row, sq.col)).join("->");
+    moveText += ` via ${used}`;
+  }
+  moveLog.push(moveText);
+  if (moveLog.length > 30) moveLog.shift();
+}
+
+function dedupeTargets(targets) {
+  let seen = new Set();
+  let out = [];
+  for (let t of targets) {
+    let k = `${t.row},${t.col},${t.type}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out;
+}
+
+/* --- Utilities --- */
+
+function inBounds(r, c) {
+  return r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE;
+}
+
+function keyFor(r, c) {
+  return r + "," + c;
+}
+
+function fromKey(k) {
+  let [r, c] = k.split(",").map(Number);
+  return { row: r, col: c };
+}
+
+function squareName(r, c) {
+  const file = String.fromCharCode("a".charCodeAt(0) + c);
+  const rank = (BOARD_SIZE - r).toString();
+  return file + rank;
+}
+
+function sliderDirections(type) {
+  let dirs = [];
+  if (type === 'R' || type === 'Q') {
+    dirs.push([1,0],[-1,0],[0,1],[0,-1]);
+  }
+  if (type === 'B' || type === 'Q') {
+    dirs.push([1,1],[1,-1],[-1,1],[-1,-1]);
+  }
+  return dirs;
+}
+
+function sliderRelaySearch(piece) {
+  // Build graph of reachable primed pivots and collect all relay targets (pivots + full slider moves from pivots).
+  let color = piece.color;
+  let directions = sliderDirections(piece.type);
+  let start = { row: piece.row, col: piece.col };
+  let queue = [start];
+  let visited = new Set();
+  let parents = {};
+  let segments = {};
+  let pivotKeys = new Set();
+  let targets = [];
+  let pivotMoves = {};
+
+  while (queue.length > 0) {
+    let cur = queue.shift();
+    let curKey = keyFor(cur.row, cur.col);
+    for (let d of directions) {
+      let dr = d[0];
+      let dc = d[1];
+      let rr = cur.row + dr;
+      let cc = cur.col + dc;
+      let firstPrime = null;
+      while (inBounds(rr, cc)) {
+        let cellPiece = board[rr][cc];
+        if (cellPiece && cellPiece.color === color) break; // own block
+        let cellPrime = primed[rr][cc];
+
+        if (cellPrime && cellPrime.color === color) {
+          firstPrime = { row: rr, col: cc };
+          let key = keyFor(rr, cc);
+          if (!pivotKeys.has(key)) {
+            pivotKeys.add(key);
+            targets.push({ row: rr, col: cc, type: 'relay' });
+          }
+          if (!visited.has(key)) {
+            visited.add(key);
+            parents[key] = curKey;
+            segments[key] = collectPrimedSegment(cur, firstPrime);
+            queue.push(firstPrime);
+          }
+          if (cellPiece && cellPiece.color !== color) break; // captured piece ends ray
+        }
+
+        rr += dr;
+        cc += dc;
+      }
+    }
+  }
+
+  // From each reachable pivot, add all standard slider moves from that pivot
+  for (let pivKey of pivotKeys) {
+    let pos = fromKey(pivKey);
+    let moves = sliderMovesFrom(pos.row, pos.col, piece.type, color, piece.row, piece.col);
+    pivotMoves[pivKey] = moves;
+    for (let m of moves) {
+      targets.push({ row: m.row, col: m.col, type: 'relay' });
+    }
+  }
+
+  return { parents, segments, pivotKeys, targets, pivotMoves };
+}
+
+function collectPrimedSegment(from, to) {
+  // Return primed squares along straight line from from(exclusive) to to(inclusive)
+  let seg = [];
+  let dr = Math.sign(to.row - from.row);
+  let dc = Math.sign(to.col - from.col);
+  let rr = from.row + dr;
+  let cc = from.col + dc;
+  while (rr !== to.row || cc !== to.col) {
+    if (primed[rr][cc]) {
+      seg.push({ row: rr, col: cc });
+    }
+    rr += dr;
+    cc += dc;
+  }
+  if (primed[to.row][to.col]) seg.push({ row: to.row, col: to.col });
+  return seg;
+}
+
+function sliderMovesFrom(r, c, type, color, ignoreRow, ignoreCol) {
+  let moves = [];
+  let dirs = sliderDirections(type);
+  for (let d of dirs) {
+    let dr = d[0];
+    let dc = d[1];
+    let rr = r + dr;
+    let cc = c + dc;
+    while (inBounds(rr, cc)) {
+      if (rr === ignoreRow && cc === ignoreCol) {
+        rr += dr;
+        cc += dc;
+        continue;
+      }
+      let cellPiece = board[rr][cc];
+      if (!cellPiece) {
+        moves.push({ row: rr, col: cc });
+      } else {
+        if (cellPiece.color !== color) moves.push({ row: rr, col: cc });
+        break;
+      }
+      rr += dr;
+      cc += dc;
+    }
+  }
+  return moves;
+}
+
+function sliderRelayPath(search, piece, destRow, destCol) {
+  let color = piece.color;
+  let destPrime = primed[destRow][destCol];
+  let destKey = keyFor(destRow, destCol);
+  let startKey = keyFor(piece.row, piece.col);
+
+  if (destPrime && destPrime.color === color && search.pivotKeys.has(destKey)) {
+    return reconstructPivotPath(startKey, destKey, search.parents, search.segments, color);
+  }
+
+  for (let pivotKey of search.pivotKeys) {
+    let moves = search.pivotMoves[pivotKey] || [];
+    if (moves.some(m => m.row === destRow && m.col === destCol)) {
+      let pathToPivot = reconstructPivotPath(startKey, pivotKey, search.parents, search.segments, color);
+      let destPiece = board[destRow][destCol];
+      if (destPiece && destPiece.color === color) continue;
+      return pathToPivot;
+    }
+  }
+
+  return null;
+}
+
+function reconstructPivotPath(startKey, destKey, parents, segments, color) {
+  let path = [];
+  let walk = destKey;
+  while (walk !== startKey) {
+    let seg = segments[walk] || [];
+    path = seg.concat(path);
+    walk = parents[walk];
+  }
+  let destPos = fromKey(destKey);
+  let destPiece = board[destPos.row][destPos.col];
+  if (destPiece && destPiece.color === color) return null;
+  return path;
+}
+
+function reconstructKnightPrimedPath(destStateKey, startStateKey, parents, color) {
+  let path = [];
+  let walk = destStateKey;
+  while (walk && walk !== startStateKey) {
+    let parts = walk.split(",");
+    let coord = parts[0] + "," + parts[1];
+    let pos = fromKey(coord);
+    if (primed[pos.row][pos.col] && primed[pos.row][pos.col].color === color) {
+      path.push({ row: pos.row, col: pos.col });
+    }
+    console.log("Knight path backtrack", walk, "coord", coord);
+    walk = parents[walk];
+  }
+  path.reverse();
+  console.log("Knight primed path collected", path);
+  return path;
+}
+
+</script>
+</body>
+</html>
