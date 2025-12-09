@@ -31,6 +31,9 @@ const LABEL_MARGIN = 18;
 const SIDEBAR_WIDTH = 200;
 const BOARD_ORIGIN_X = LABEL_MARGIN;
 const BOARD_ORIGIN_Y = LABEL_MARGIN;
+const MODE_IMG_Y = 340;
+const MODE_IMG_W = 180;
+const MODE_IMG_H = 120;
 let tileSize;
 let spriteSheet;
 let board;        // [row][col] = piece or null
@@ -48,6 +51,7 @@ let undoBtn, redoBtn, resetBtn, modeImg;
 let captured;
 let enPassantTarget = null; // {row,col,color} where a pawn just passed
 let anchorWhiteImg, anchorBlackImg;
+let anchorPool = { white: 4, black: 4 };
 
 const PIECE_VALUE = { P:1, N:3, B:3, R:5, Q:9, K:0 };
 
@@ -124,6 +128,7 @@ function initGame() {
   lastSliderSearch = null;
   lastPawnSearch = null;
   enPassantTarget = null;
+  anchorPool = { white: 4, black: 4 };
   updateModeImage();
   recordHistory(); // initial state
 }
@@ -284,13 +289,38 @@ function drawUIOverlay() {
   textSize(14);
   let modeText = anchorMode ? "Anchor Mode (space to switch)" : "Move Mode (space to switch)";
   let turnText = "Turn: " + (currentPlayer === 'white' ? "White" : "Black");
-  let anchorSummary = getAnchorSummary();
   text(turnText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 10);
   text(modeText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 28);
-  text(anchorSummary, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 46);
+  drawAnchorPoolIcons(BOARD_ORIGIN_X + BOARD_PIXELS + 10, MODE_IMG_Y + MODE_IMG_H + 4);
 
   drawMoveLog();
   drawCapturedDrawer();
+}
+
+function drawAnchorPoolIcons(x, y) {
+  let size = 16;
+  let gap = 4;
+  textSize(12);
+  fill(255);
+  text("Anchors", x, y);
+  y += 12;
+  drawPoolRow('white', x, y, size, gap);
+  drawPoolRow('black', x, y + size + 4, size, gap);
+}
+
+function drawPoolRow(color, x, y, size, gap) {
+  let img = color === 'white' ? anchorWhiteImg : anchorBlackImg;
+  for (let i = 0; i < 4; i++) {
+    let alpha = i < anchorPool[color] ? 255 : 60;
+    if (img) {
+      tint(255, alpha);
+      image(img, x + i * (size + gap), y, size, size);
+      noTint();
+    } else {
+      fill(color === 'white' ? 200 : 80, alpha);
+      rect(x + i * (size + gap), y, size, size, 3);
+    }
+  }
 }
 
 function mousePressed() {
@@ -304,6 +334,15 @@ function mousePressed() {
   }
 
   let clickedPiece = board[row][col];
+  // In anchor mode: allow clicking existing friendly anchor to remove it and refund.
+  if (anchorMode && anchored[row][col] === currentPlayer && (!selectedPiece || !clickedPiece)) {
+    anchored[row][col] = null;
+    anchorPool[currentPlayer] = Math.min(anchorPool[currentPlayer] + 1, 4);
+    selectedPiece = null;
+    legalTargets = [];
+    pruneAnchors();
+    return;
+  }
 
   // If we have a selection and clicked on a legal target square, execute that.
   let target = null;
@@ -356,18 +395,19 @@ function keyPressed() {
 
 function setupUIButtons() {
   const btnX = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
+  const btnY = 70;
   undoBtn = createButton('⟵ Back');
-  undoBtn.position(btnX, 70);
+  undoBtn.position(btnX, btnY);
   undoBtn.mousePressed(undoMove);
   redoBtn = createButton('Forward ⟶');
-  redoBtn.position(btnX + 80, 70);
+  redoBtn.position(btnX + 80, btnY);
   redoBtn.mousePressed(redoMove);
   resetBtn = createButton('Restart');
-  resetBtn.position(btnX, 100);
+  resetBtn.position(btnX, btnY + 26);
   resetBtn.mousePressed(initGame);
   modeImg = createImg('movemode.png', 'mode toggle');
-  modeImg.position(btnX, 360);
-  modeImg.size(200, 133);
+  modeImg.position(btnX+10, MODE_IMG_Y);
+  modeImg.size(MODE_IMG_W, MODE_IMG_H);
   modeImg.mousePressed(() => {
     anchorMode = !anchorMode;
     updateModeImage();
@@ -415,7 +455,9 @@ function doMove(piece, destRow, destCol) {
 }
 
 function doAnchor(piece, destRow, destCol) {
+  if (anchorPool[currentPlayer] <= 0) return;
   addAnchor(destRow, destCol, currentPlayer, piece);
+  anchorPool[currentPlayer] -= 1;
   logAction(piece, destRow, destCol, "anchor");
 
   // After priming, drop back to move mode to avoid accidental re-priming next turn.
@@ -827,24 +869,14 @@ function getRelayPath(piece, destRow, destCol) {
 /* --- UI helpers --- */
 
 function getAnchorSummary() {
-  let white = 0;
-  let black = 0;
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      let p = anchored[r][c];
-      if (!p) continue;
-      if (p === 'white') white++;
-      else if (p === 'black') black++;
-    }
-  }
-  return `Anchored W:${white} B:${black}`;
+  return "";
 }
 
 function drawMoveLog() {
   let logHeight = 200;
   let logWidth = SIDEBAR_WIDTH - 20;
   let x = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
-  let y = 130;
+  let y = 120;
   fill(0, 180);
   noStroke();
   rect(x, y, logWidth, logHeight, 6);
@@ -865,7 +897,7 @@ function drawCapturedDrawer() {
   let drawerWidth = SIDEBAR_WIDTH - 20;
   let drawerHeight = 140;
   let x = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
-  let y = 360 + 150; // below mode image
+  let y = MODE_IMG_Y + MODE_IMG_H + 60; // below mode image and anchor pool
   fill(200, 200, 200, 200);
   noStroke();
   rect(x, y, drawerWidth, drawerHeight, 6);
@@ -1358,7 +1390,8 @@ function recordHistory() {
     currentPlayer,
     moveLog: [...moveLog],
     anchorMode,
-    enPassantTarget: enPassantTarget ? { ...enPassantTarget } : null
+    enPassantTarget: enPassantTarget ? { ...enPassantTarget } : null,
+    anchorPool: { ...anchorPool }
   };
   history.push(snapshot);
   historyIndex = history.length - 1;
@@ -1376,6 +1409,7 @@ function applySnapshot(snap) {
   moveLog = [...snap.moveLog];
   anchorMode = snap.anchorMode;
   enPassantTarget = snap.enPassantTarget ? { ...snap.enPassantTarget } : null;
+  anchorPool = snap.anchorPool ? { white: snap.anchorPool.white, black: snap.anchorPool.black } : { white: 4, black: 4 };
   selectedPiece = null;
   legalTargets = [];
   lastSliderSearch = null;
