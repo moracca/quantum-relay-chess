@@ -1471,11 +1471,17 @@ function hasAnchor(row, col, color) {
 }
 
 function consumeAnchorColor(row, col, color) {
-  if (anchored[row][col] === color) anchored[row][col] = null;
+  if (anchored[row][col] === color) {
+    anchored[row][col] = null;
+    refundAnchor(color);
+  }
 }
 
 function reconcileAnchoredOnOccupant(row, col) {
-  if (anchored[row][col]) anchored[row][col] = null;
+  if (anchored[row][col]) {
+    refundAnchor(anchored[row][col]);
+    anchored[row][col] = null;
+  }
 }
 
 function canPieceCaptureFrom(type, color, sr, sc, tr, tc) {
@@ -1537,8 +1543,9 @@ function pruneAnchors() {
     for (let c = 0; c < BOARD_SIZE; c++) {
       let owner = anchored[r][c];
       if (!owner) continue;
-      if (board[r][c]) { anchored[r][c] = null; continue; }
+      if (board[r][c]) { refundAnchor(owner); anchored[r][c] = null; continue; }
       if (!anyPieceCanReach(owner, r, c)) {
+        refundAnchor(owner);
         anchored[r][c] = null;
       }
     }
@@ -1571,6 +1578,11 @@ function pieceCanReachSquare(piece, tr, tc) {
     }
   }
   return false;
+}
+
+function refundAnchor(owner) {
+  if (!owner) return;
+  anchorPool[owner] = Math.min(4, (anchorPool[owner] || 0) + 1);
 }
 
 /* --- Castling helpers --- */
