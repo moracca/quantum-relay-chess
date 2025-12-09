@@ -46,6 +46,7 @@ let history = [];
 let historyIndex = -1;
 let undoBtn, redoBtn, resetBtn, modeImg;
 let captured;
+let enPassantTarget = null; // {row,col,color} where a pawn just passed
 
 const PIECE_VALUE = { P:1, N:3, B:3, R:5, Q:9, K:0 };
 
@@ -55,6 +56,7 @@ class Piece {
     this.color = color; // 'white' or 'black'
     this.row = row;
     this.col = col;
+    this.moved = false;
   }
 }
 
@@ -118,6 +120,7 @@ function initGame() {
   historyIndex = -1;
   lastSliderSearch = null;
   lastPawnSearch = null;
+  enPassantTarget = null;
   updateModeImage();
   recordHistory(); // initial state
 }
@@ -433,11 +436,31 @@ function doMove(piece, destRow, destCol) {
   if (targetPiece) {
     addCapture(piece.color, targetPiece);
   }
+  // handle castling rook move
+  if (piece.type === 'K' && Math.abs(destCol - piece.col) === 2) {
+    performCastlingRookMove(piece, destCol);
+  }
+  // handle en passant capture
+  if (piece.type === 'P' && !targetPiece && enPassantTarget && destRow === enPassantTarget.row && destCol === enPassantTarget.col) {
+    let capRow = piece.color === 'white' ? destRow + 1 : destRow - 1;
+    let capturedPawn = board[capRow][destCol];
+    if (capturedPawn) {
+      addCapture(piece.color, capturedPawn);
+      board[capRow][destCol] = null;
+    }
+  }
+  // update en passant availability
+  enPassantTarget = null;
+  if (piece.type === 'P' && Math.abs(destRow - piece.row) === 2) {
+    enPassantTarget = { row: (piece.row + destRow) / 2, col: destCol, color: piece.color };
+  }
   logAction(piece, destRow, destCol, "move", targetPiece);
   piece.row = destRow;
   piece.col = destCol;
+  piece.moved = true;
   board[destRow][destCol] = piece;
   reconcileAnchoredOnOccupant(destRow, destCol);
+  clearAnchorsOnPathCollision(piece, destRow, destCol);
 
   endTurn();
 }
@@ -484,8 +507,10 @@ function doRelayMove(piece, destRow, destCol) {
   logAction(piece, destRow, destCol, "relay", targetPiece, path);
   piece.row = destRow;
   piece.col = destCol;
+  piece.moved = true;
   board[destRow][destCol] = piece;
   reconcileAnchoredOnOccupant(destRow, destCol);
+  clearAnchorsOnPathCollision(piece, destRow, destCol);
 
   endTurn();
 }
@@ -580,6 +605,10 @@ function getStandardMoves(piece) {
       if (inBounds(rr, cc) && board[rr][cc] && board[rr][cc].color !== color) {
         moves.push({ row: rr, col: cc });
       }
+      // En passant capture
+      if (enPassantTarget && enPassantTarget.row === rr && enPassantTarget.col === cc && enPassantTarget.color !== color) {
+        moves.push({ row: rr, col: cc, enPassant: true });
+      }
     }
 
   } else if (piece.type === 'R') {
@@ -613,6 +642,15 @@ function getStandardMoves(piece) {
         if (!board[rr][cc] || board[rr][cc].color !== color) {
           moves.push({ row: rr, col: cc });
         }
+      }
+    }
+    // Castling
+    if (!piece.moved && !isKingInCheck(board, color)) {
+      if (canCastle(board, color, 'king')) {
+        moves.push({ row: r, col: c + 2, castle: 'king' });
+      }
+      if (canCastle(board, color, 'queen')) {
+        moves.push({ row: r, col: c - 2, castle: 'queen' });
       }
     }
   }
@@ -973,8 +1011,16 @@ function simulateBoardAfterTarget(piece, target) {
   let moving = newBoard[piece.row][piece.col];
   if (target.type === 'move' || target.type === 'relay') {
     newBoard[piece.row][piece.col] = null;
-    let destPiece = newBoard[target.row][target.col];
-    // capture handled by overwrite
+    // handle castling rook in simulation
+    if (moving.type === 'K' && Math.abs(target.col - piece.col) === 2) {
+      simulateCastlingRook(newBoard, moving.color, target.col);
+    }
+    moving = newBoard[piece.row][piece.col] || moving; // in case rook move touched it
+    // en passant capture in simulation
+    if (moving.type === 'P' && target.enPassant) {
+      let capRow = moving.color === 'white' ? target.row + 1 : target.row - 1;
+      newBoard[capRow][target.col] = null;
+    }
     moving.row = target.row;
     moving.col = target.col;
     newBoard[target.row][target.col] = moving;
@@ -1357,7 +1403,8 @@ function recordHistory() {
     },
     currentPlayer,
     moveLog: [...moveLog],
-    anchorMode
+    anchorMode,
+    enPassantTarget: enPassantTarget ? { ...enPassantTarget } : null
   };
   history.push(snapshot);
   historyIndex = history.length - 1;
@@ -1374,6 +1421,7 @@ function applySnapshot(snap) {
   currentPlayer = snap.currentPlayer;
   moveLog = [...snap.moveLog];
   anchorMode = snap.anchorMode;
+  enPassantTarget = snap.enPassantTarget ? { ...snap.enPassantTarget } : null;
   selectedPiece = null;
   legalTargets = [];
   lastSliderSearch = null;
@@ -1398,7 +1446,13 @@ function cloneBoard(src) {
     out[r] = [];
     for (let c = 0; c < BOARD_SIZE; c++) {
       let p = src[r][c];
-      out[r][c] = p ? new Piece(p.type, p.color, p.row, p.col) : null;
+      if (p) {
+        let np = new Piece(p.type, p.color, p.row, p.col);
+        np.moved = p.moved;
+        out[r][c] = np;
+      } else {
+        out[r][c] = null;
+      }
     }
   }
   return out;
@@ -1521,6 +1575,99 @@ function addCapture(capturingColor, piece) {
 
 function capturedScore(color) {
   return captured[color].reduce((sum, p) => sum + (PIECE_VALUE[p.type] || 0), 0);
+}
+
+function clearAnchorsOnPathCollision(piece, destRow, destCol) {
+  // remove any anchor entries whose straight-line path to source is now blocked by this moved piece
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      let cell = anchored[r][c];
+      if (!cell || !cell.entries || cell.entries.length === 0) continue;
+      cell.entries = cell.entries.filter(e => {
+        // only sliders care about path; knights/king/pawn anchors drop if occupied directly (handled elsewhere)
+        if (e.source.row === destRow && e.source.col === destCol) return true;
+        let type = e.type;
+        if (type === 'N' || type === 'K' || type === 'P') {
+          // if the anchor square is now occupied by any piece, drop anchors of these types
+          if (r === destRow && c === destCol) return false;
+          return true;
+        }
+        if (type === 'R' || type === 'B' || type === 'Q') {
+          let dr = Math.sign(e.source.row - r);
+          let dc = Math.sign(e.source.col - c);
+          // ensure same line
+          if (dr !== 0 && dc !== 0 && Math.abs(e.source.row - r) !== Math.abs(e.source.col - c)) return true;
+          if (dr === 0 && dc === 0) return true;
+          let rr = r + dr;
+          let cc = c + dc;
+          while (rr !== e.source.row || cc !== e.source.col) {
+            if (rr === destRow && cc === destCol) return false; // blocked
+            if (board[rr][cc] && !(rr === piece.row && cc === piece.col)) {
+              return true; // blocked by existing piece
+            }
+            rr += dr;
+            cc += dc;
+          }
+        }
+        return true;
+      });
+    }
+  }
+}
+
+/* --- Castling helpers --- */
+
+function canCastle(b, color, side) {
+  let row = color === 'white' ? 7 : 0;
+  let kingCol = 4;
+  let rookCol = side === 'king' ? 7 : 0;
+  let king = b[row][kingCol];
+  let rook = b[row][rookCol];
+  if (!king || !rook || king.type !== 'K' || rook.type !== 'R') return false;
+  if (king.moved || rook.moved) return false;
+  // squares between must be empty
+  let colsBetween = side === 'king' ? [5,6] : [1,2,3];
+  for (let c of colsBetween) {
+    if (b[row][c]) return false;
+  }
+  // cannot castle through or into check
+  let colsToCheck = side === 'king' ? [4,5,6] : [4,3,2];
+  for (let c of colsToCheck) {
+    if (isSquareAttacked(b, row, c, color === 'white' ? 'black' : 'white')) return false;
+  }
+  return true;
+}
+
+function performCastlingRookMove(king, destCol) {
+  let row = king.row;
+  if (destCol === 6) {
+    // king side
+    let rook = board[row][7];
+    board[row][7] = null;
+    rook.col = 5;
+    rook.moved = true;
+    board[row][5] = rook;
+  } else if (destCol === 2) {
+    // queen side
+    let rook = board[row][0];
+    board[row][0] = null;
+    rook.col = 3;
+    rook.moved = true;
+    board[row][3] = rook;
+  }
+}
+
+function simulateCastlingRook(b, color, destCol) {
+  let row = color === 'white' ? 7 : 0;
+  if (destCol === 6) {
+    let rook = b[row][7];
+    b[row][7] = null;
+    b[row][5] = rook;
+  } else if (destCol === 2) {
+    let rook = b[row][0];
+    b[row][0] = null;
+    b[row][3] = rook;
+  }
 }
 
 </script>
