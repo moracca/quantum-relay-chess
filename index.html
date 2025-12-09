@@ -14,15 +14,15 @@
     - Click your own piece to select it.
     - Click a highlighted square to:
         • Move there (normal move), or
-        • Relay-move there (if it's reachable via primed squares), or
-        • Prime it (if in Prime Mode).
-    - Press 'P' to toggle Prime Mode on/off.
+        • Relay-move there (if it's reachable via anchored squares), or
+        • Anchor it (if in Anchor Mode).
+    - Press 'P' to toggle Anchor Mode on/off.
 
   Simplifications in this prototype:
     - No check / checkmate detection (game doesn’t enforce check rules).
     - Relay moves implemented for: rook, bishop, queen, knight.
     - Pawn & king do NOT relay yet.
-    - Primed squares are consumed along the used relay path.
+    - Anchored squares are consumed along the used relay path.
 */
 
 const BOARD_SIZE = 8;
@@ -32,14 +32,22 @@ const SIDEBAR_WIDTH = 200;
 const BOARD_ORIGIN_X = LABEL_MARGIN;
 const BOARD_ORIGIN_Y = LABEL_MARGIN;
 let tileSize;
+let spriteSheet;
 let board;        // [row][col] = piece or null
-let primed;       // [row][col] = { color: 'white'|'black', charge: 1 } or null
+let anchored;       // [row][col] = { color: 'white'|'black', charge: 1 } or null
 let currentPlayer = 'white';
 let selectedPiece = null;
-let legalTargets = [];   // array of {row, col, type: 'move' | 'relay' | 'prime'}
-let primeMode = false;
+let legalTargets = [];   // array of {row, col, type: 'move' | 'relay' | 'anchor'}
+let anchorMode = false;
 let moveLog = [];
 let lastSliderSearch = null;
+let lastPawnSearch = null;
+let history = [];
+let historyIndex = -1;
+let undoBtn, redoBtn, resetBtn, modeImg;
+let captured;
+
+const PIECE_VALUE = { P:1, N:3, B:3, R:5, Q:9, K:0 };
 
 class Piece {
   constructor(type, color, row, col) {
@@ -50,21 +58,27 @@ class Piece {
   }
 }
 
+function preload() {
+  spriteSheet = loadImage('piecesprite.svg');
+}
+
 function setup() {
   createCanvas(BOARD_ORIGIN_X + BOARD_PIXELS + SIDEBAR_WIDTH, BOARD_ORIGIN_Y + BOARD_PIXELS + LABEL_MARGIN);
   tileSize = BOARD_PIXELS / BOARD_SIZE;
   initGame();
+  setupUIButtons();
 }
 
 function initGame() {
   board = [];
-  primed = [];
+  anchored = [];
+  captured = { white: [], black: [] };
   for (let r = 0; r < BOARD_SIZE; r++) {
     board[r] = [];
-    primed[r] = [];
+    anchored[r] = [];
     for (let c = 0; c < BOARD_SIZE; c++) {
       board[r][c] = null;
-      primed[r][c] = null;
+      anchored[r][c] = { entries: [] }; // entries: [{ color, source:{row,col}, type }]
     }
   }
 
@@ -98,6 +112,14 @@ function initGame() {
   currentPlayer = 'white';
   selectedPiece = null;
   legalTargets = [];
+  anchorMode = false;
+  moveLog = [];
+  history = [];
+  historyIndex = -1;
+  lastSliderSearch = null;
+  lastPawnSearch = null;
+  updateModeImage();
+  recordHistory(); // initial state
 }
 
 function placePiece(piece) {
@@ -107,7 +129,8 @@ function placePiece(piece) {
 function draw() {
   background(220);
   drawBoard();
-  drawPrimedSquares();
+  drawAnchoredSquares();
+  drawAnchorArrows();
   drawPieces();
   drawHighlights();
   drawCoordinates();
@@ -126,24 +149,70 @@ function drawBoard() {
   }
 }
 
-function drawPrimedSquares() {
+function drawAnchoredSquares() {
   for (let r = 0; r < BOARD_SIZE; r++) {
     for (let c = 0; c < BOARD_SIZE; c++) {
-      let p = primed[r][c];
-      if (p) {
-        if (p.color === 'white') fill(100, 180, 255, 140); // light blue
-        else fill(255, 120, 120, 140); // light red
-        noStroke();
-        rect(BOARD_ORIGIN_X + c * tileSize, BOARD_ORIGIN_Y + r * tileSize, tileSize, tileSize);
+      let p = anchored[r][c];
+      if (!p || p.entries.length === 0) continue;
+      let hasWhite = p.entries.some(e => e.color === 'white');
+      let hasBlack = p.entries.some(e => e.color === 'black');
+      if (hasWhite && hasBlack) fill(200, 150, 200, 160);
+      else if (hasWhite) fill(100, 180, 255, 140); // light blue
+      else fill(255, 120, 120, 140); // light red
+      noStroke();
+      rect(BOARD_ORIGIN_X + c * tileSize, BOARD_ORIGIN_Y + r * tileSize, tileSize, tileSize);
 
-        // Small charge indicator
-        fill(0);
-        textSize(tileSize * 0.25);
-        textAlign(RIGHT, TOP);
-        text(p.charge || 1, BOARD_ORIGIN_X + (c + 1) * tileSize - 4, BOARD_ORIGIN_Y + r * tileSize + 4);
+      // indicator count
+      fill(0);
+      textSize(tileSize * 0.25);
+      textAlign(RIGHT, TOP);
+      let wCount = p.entries.filter(e => e.color === 'white').length;
+      let bCount = p.entries.filter(e => e.color === 'black').length;
+      let label = '';
+      if (wCount > 0) label += wCount;
+      if (bCount > 0) label += (label ? '/' : '') + bCount;
+      text(label, BOARD_ORIGIN_X + (c + 1) * tileSize - 4, BOARD_ORIGIN_Y + r * tileSize + 4);
+    }
+  }
+}
+
+function drawAnchorArrows() {
+  strokeWeight(3);
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      let p = anchored[r][c];
+      if (!p || p.entries.length === 0) continue;
+      for (let entry of p.entries) {
+        let src = entry.source;
+        let srcPiece = board[src.row]?.[src.col];
+        if (!srcPiece || srcPiece.color !== entry.color) continue;
+        let sx = BOARD_ORIGIN_X + (src.col + 0.5) * tileSize;
+        let sy = BOARD_ORIGIN_Y + (src.row + 0.5) * tileSize;
+        let dx = BOARD_ORIGIN_X + (c + 0.5) * tileSize;
+        let dy = BOARD_ORIGIN_Y + (r + 0.5) * tileSize;
+        if (entry.color === 'white') stroke(255, 255, 255, 255);
+        else stroke(0, 0, 0, 255);
+        line(sx, sy, dx, dy);
+        // arrowhead
+        let angle = atan2(dy - sy, dx - sx);
+        let ah = 10;
+        line(
+          dx,
+          dy,
+          dx - ah * cos(angle - PI / 8),
+          dy - ah * sin(angle - PI / 8)
+        );
+        line(
+          dx,
+          dy,
+          dx - ah * cos(angle + PI / 8),
+          dy - ah * sin(angle + PI / 8)
+        );
       }
     }
   }
+  strokeWeight(1);
+  stroke(0);
 }
 
 function drawPieces() {
@@ -153,24 +222,52 @@ function drawPieces() {
     for (let c = 0; c < BOARD_SIZE; c++) {
       let piece = board[r][c];
       if (piece) {
-        if (piece.color === 'white') fill(255);
-        else fill(20);
-        stroke(0);
-        strokeWeight(2);
-        // draw circle
-        ellipse(
-          BOARD_ORIGIN_X + c * tileSize + tileSize / 2,
-          BOARD_ORIGIN_Y + r * tileSize + tileSize / 2,
-          tileSize * 0.8
-        );
-        // draw letter
-        if (piece.color === 'white') fill(0);
-        else fill(255);
-        noStroke();
-        text(piece.type, BOARD_ORIGIN_X + c * tileSize + tileSize / 2, BOARD_ORIGIN_Y + r * tileSize + tileSize / 2);
+        drawSprite(piece, r, c);
       }
     }
   }
+}
+
+function drawSprite(piece, r, c) {
+  if (!spriteSheet) return;
+  const SPRITE_COLS = 6;
+  const SPRITE_ROWS = 2;
+  const SPRITE_MAP = {
+    white: { K: [0,0], Q: [1,0], B: [2,0], N: [3,0], R: [4,0], P: [5,0] },
+    black: { K: [0,1], Q: [1,1], B: [2,1], N: [3,1], R: [4,1], P: [5,1] }
+  };
+  let [sxIdx, syIdx] = SPRITE_MAP[piece.color][piece.type];
+  let sw = spriteSheet.width / SPRITE_COLS;
+  let sh = spriteSheet.height / SPRITE_ROWS;
+  let sx = sxIdx * sw;
+  let sy = syIdx * sh;
+  image(
+    spriteSheet,
+    BOARD_ORIGIN_X + c * tileSize,
+    BOARD_ORIGIN_Y + r * tileSize,
+    tileSize,
+    tileSize,
+    sx,
+    sy,
+    sw,
+    sh
+  );
+}
+
+function drawSpriteAt(type, color, x, y, size) {
+  if (!spriteSheet) return;
+  const SPRITE_COLS = 6;
+  const SPRITE_ROWS = 2;
+  const SPRITE_MAP = {
+    white: { K: [0,0], Q: [1,0], B: [2,0], N: [3,0], R: [4,0], P: [5,0] },
+    black: { K: [0,1], Q: [1,1], B: [2,1], N: [3,1], R: [4,1], P: [5,1] }
+  };
+  let [sxIdx, syIdx] = SPRITE_MAP[color][type];
+  let sw = spriteSheet.width / SPRITE_COLS;
+  let sh = spriteSheet.height / SPRITE_ROWS;
+  let sx = sxIdx * sw;
+  let sy = syIdx * sh;
+  image(spriteSheet, x, y, size, size, sx, sy, sw, sh);
 }
 
 function drawHighlights() {
@@ -199,7 +296,7 @@ function drawHighlights() {
       stroke(255, 165, 0);
       strokeWeight(3);
       rect(BOARD_ORIGIN_X + t.col * tileSize, BOARD_ORIGIN_Y + t.row * tileSize, tileSize, tileSize);
-    } else if (t.type === 'prime') {
+    } else if (t.type === 'anchor') {
       noFill();
       stroke(0, 200, 255);
       strokeWeight(3);
@@ -233,14 +330,15 @@ function drawUIOverlay() {
   fill(255);
   textAlign(LEFT, TOP);
   textSize(14);
-  let modeText = primeMode ? "Prime Mode (P to switch)" : "Move Mode (P to switch)";
+  let modeText = anchorMode ? "Anchor Mode (P to switch)" : "Move Mode (P to switch)";
   let turnText = "Turn: " + (currentPlayer === 'white' ? "White" : "Black");
-  let primeSummary = getPrimeSummary();
+  let anchorSummary = getAnchorSummary();
   text(turnText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 10);
   text(modeText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 28);
-  text(primeSummary, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 46);
+  text(anchorSummary, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 46);
 
   drawMoveLog();
+  drawCapturedDrawer();
 }
 
 function mousePressed() {
@@ -259,10 +357,10 @@ function mousePressed() {
   let target = null;
 
   if (selectedPiece) {
-    if (primeMode) {
-      // In prime mode, prefer PRIME targets on this square
+    if (anchorMode) {
+      // In anchor mode, prefer ANCHOR targets on this square
       target = legalTargets.find(
-        t => t.row === row && t.col === col && t.type === 'prime'
+        t => t.row === row && t.col === col && t.type === 'anchor'
       ) || legalTargets.find(
         t => t.row === row && t.col === col
       );
@@ -275,8 +373,8 @@ function mousePressed() {
   if (selectedPiece && target) {
     if (target.type === 'move') {
       doMove(selectedPiece, row, col);
-    } else if (target.type === 'prime') {
-      doPrime(selectedPiece, row, col);
+    } else if (target.type === 'anchor') {
+      doAnchor(selectedPiece, row, col);
     } else if (target.type === 'relay') {
       doRelayMove(selectedPiece, row, col);
     }
@@ -298,48 +396,68 @@ function mousePressed() {
 
 function keyPressed() {
   if (key === 'p' || key === 'P') {
-    primeMode = !primeMode;
+    anchorMode = !anchorMode;
+    updateModeImage();
     if (selectedPiece) computeLegalTargets();
   }
 }
 
-/* --- Move / Prime / Relay logic --- */
+function setupUIButtons() {
+  const btnX = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
+  undoBtn = createButton('⟵ Back');
+  undoBtn.position(btnX, 70);
+  undoBtn.mousePressed(undoMove);
+  redoBtn = createButton('Forward ⟶');
+  redoBtn.position(btnX + 80, 70);
+  redoBtn.mousePressed(redoMove);
+  resetBtn = createButton('Restart');
+  resetBtn.position(btnX, 100);
+  resetBtn.mousePressed(initGame);
+  modeImg = createImg('movemode.png', 'mode toggle');
+  modeImg.position(btnX, 360);
+  modeImg.size(200, 133);
+  modeImg.mousePressed(() => {
+    anchorMode = !anchorMode;
+    updateModeImage();
+    if (selectedPiece) computeLegalTargets();
+  });
+}
+
+/* --- Move / Anchor / Relay logic --- */
 
 function doMove(piece, destRow, destCol) {
   // normal move, capture if enemy there
+  clearAnchorsFromSource(piece.row, piece.col);
   board[piece.row][piece.col] = null;
   let targetPiece = board[destRow][destCol];
   if (targetPiece) {
-    // captured piece simply removed
+    addCapture(piece.color, targetPiece);
   }
   logAction(piece, destRow, destCol, "move", targetPiece);
   piece.row = destRow;
   piece.col = destCol;
   board[destRow][destCol] = piece;
+  reconcileAnchoredOnOccupant(destRow, destCol);
 
   endTurn();
 }
 
-function doPrime(piece, destRow, destCol) {
-  // Mark dest square as primed for current player
-  primed[destRow][destCol] = {
-    color: currentPlayer,
-    charge: 1
-  };
-  // Overwriting (same or opposite color) just replaces it, we’re ignoring multi-charge for now.
-  logAction(piece, destRow, destCol, "prime");
+function doAnchor(piece, destRow, destCol) {
+  addAnchor(destRow, destCol, currentPlayer, piece);
+  logAction(piece, destRow, destCol, "anchor");
 
   // After priming, drop back to move mode to avoid accidental re-priming next turn.
-  primeMode = false;
+  anchorMode = false;
+  updateModeImage();
 
   endTurn();
 }
 
 function doRelayMove(piece, destRow, destCol) {
-  // We need to consume primed squares along the path.
+  // We need to consume anchored squares along the path.
   // For sliding pieces: path is straight; for knights: we reconstruct BFS path.
 
-  // Determine path and consume primed squares.
+  // Determine path and consume anchored squares.
   let path = getRelayPath(piece, destRow, destCol);
   if (!path) {
     // Shouldn't happen if we computed targets correctly, but sanity check.
@@ -347,31 +465,36 @@ function doRelayMove(piece, destRow, destCol) {
     return;
   }
 
-  // Clear primed squares on the path (including destination if it was primed).
+  // Clear anchored squares on the path (including destination if it was anchored).
   console.log("Relay move path to clear:", path.map(p => keyFor(p.row, p.col)));
   for (let sq of path) {
-    if (primed[sq.row][sq.col]) {
-      console.log("Clearing prime at", keyFor(sq.row, sq.col));
+    if (hasAnchor(sq.row, sq.col, piece.color)) {
+      console.log("Clearing anchor at", keyFor(sq.row, sq.col));
     }
-    primed[sq.row][sq.col] = null;
+    consumeAnchorColor(sq.row, sq.col, piece.color);
   }
+  clearAnchorsFromSource(piece.row, piece.col);
 
   // Move piece
   board[piece.row][piece.col] = null;
   let targetPiece = board[destRow][destCol];
   if (targetPiece && targetPiece.color !== piece.color) {
-    // capture
+    addCapture(piece.color, targetPiece);
   }
   logAction(piece, destRow, destCol, "relay", targetPiece, path);
   piece.row = destRow;
   piece.col = destCol;
   board[destRow][destCol] = piece;
+  reconcileAnchoredOnOccupant(destRow, destCol);
 
   endTurn();
 }
 
 function endTurn() {
   currentPlayer = (currentPlayer === 'white') ? 'black' : 'white';
+  anchorMode = false;
+  updateModeImage();
+  recordHistory();
 }
 
 /* --- Legal target generation --- */
@@ -382,6 +505,7 @@ function computeLegalTargets() {
 
   let piece = selectedPiece;
   lastSliderSearch = null;
+  lastPawnSearch = null;
 
   // Standard moves (including captures)
   let moves = getStandardMoves(piece);
@@ -393,14 +517,14 @@ function computeLegalTargets() {
     });
   }
 
-  // Prime targets: only empty squares reachable by standard move
-  if (primeMode) {
+  // Anchor targets: only empty squares reachable by standard move
+  if (anchorMode) {
     for (let m of moves) {
       if (!board[m.row][m.col]) {
         legalTargets.push({
           row: m.row,
           col: m.col,
-          type: 'prime'
+          type: 'anchor'
         });
       }
     }
@@ -416,9 +540,12 @@ function computeLegalTargets() {
     });
   }
 
-  // If prime mode is off, make sure primed squares do not block normal movement;
-  // standard move generation already ignores primes, but we keep targets distinct.
+  // If anchor mode is off, make sure anchored squares do not block normal movement;
+  // standard move generation already ignores anchors, but we keep targets distinct.
   legalTargets = dedupeTargets(legalTargets);
+
+  // Filter out moves that leave our king in check
+  legalTargets = legalTargets.filter(t => !causesSelfCheck(piece, t));
 }
 
 /* --- Standard chess-like moves (no castling/en passant) --- */
@@ -520,9 +647,10 @@ function slideMoves(r, c, color, directions) {
 
 function getRelayTargets(piece) {
   // For this prototype:
-  //   R, B, Q: chain through your primed squares; can pivot at any primed node (queen can pivot to any of its 8 dirs)
-  //   N: BFS chaining through primed knight-squares; destination may be unprimed but chain must include at least one primed square
-  //   P, K: no relay
+  //   R, B, Q: chain through your anchored squares; can pivot at any anchored node (queen can pivot to any of its 8 dirs)
+  //   N: BFS chaining through anchored knight-squares; destination may be unanchored but chain must include at least one anchored square
+  //   P: relay forward through anchored squares; then can make a standard pawn move/capture from that anchored pivot (2-turn equivalent)
+  //   K: stepwise BFS through adjacent anchored squares; destination must be anchored
   let r = piece.row;
   let c = piece.col;
   let color = piece.color;
@@ -533,16 +661,16 @@ function getRelayTargets(piece) {
     results.push(...search.targets);
     lastSliderSearch = search; // cache for path reconstruction
   } else if (piece.type === 'N') {
-    // BFS over primed squares; destination can be unprimed but path must use at least one primed square.
-    let queue = [{ row: r, col: c, usedPrime: false }];
-    let visited = new Set(); // key + usedPrime flag
+    // BFS over anchored squares; destination can be unanchored but path must use at least one anchored square.
+    let queue = [{ row: r, col: c, usedAnchor: false }];
+    let visited = new Set(); // key + usedAnchor flag
     let knightDeltas = [
       [2,1],[2,-1],[-2,1],[-2,-1],
       [1,2],[1,-2],[-1,2],[-1,-2]
     ];
 
-    function visitKey(row, col, usedPrime) {
-      return `${row},${col},${usedPrime ? 1 : 0}`;
+    function visitKey(row, col, usedAnchor) {
+      return `${row},${col},${usedAnchor ? 1 : 0}`;
     }
 
     visited.add(visitKey(r, c, false));
@@ -555,21 +683,49 @@ function getRelayTargets(piece) {
         let cc = cur.col + d[1];
         if (!inBounds(rr, cc)) continue;
 
-        let cellPrime = primed[rr][cc];
         let cellPiece = board[rr][cc];
-        let nextUsedPrime = cur.usedPrime || (cellPrime && cellPrime.color === color);
+        let nextUsedAnchor = cur.usedAnchor || hasAnchor(rr, cc, color);
 
-        // If we have used at least one primed square in the chain, this is a relay landing spot.
-        if (nextUsedPrime && (!cellPiece || cellPiece.color !== color)) {
+        // If we have used at least one anchored square in the chain, this is a relay landing spot.
+        if (nextUsedAnchor && (!cellPiece || cellPiece.color !== color)) {
           results.push({ row: rr, col: cc });
         }
 
-        // Continue BFS only through primed squares of ours.
-        if (cellPrime && cellPrime.color === color) {
+        // Continue BFS only through anchored squares of ours.
+        if (hasAnchor(rr, cc, color)) {
           let key = visitKey(rr, cc, true);
           if (!visited.has(key)) {
             visited.add(key);
-            queue.push({ row: rr, col: cc, usedPrime: true });
+            queue.push({ row: rr, col: cc, usedAnchor: true });
+          }
+        }
+      }
+    }
+  } else if (piece.type === 'P') {
+    let search = pawnRelaySearch(piece);
+    // console.log("Pawn relay search", search);
+    results.push(...search.targets);
+    lastPawnSearch = search;
+  } else if (piece.type === 'K') {
+    let queue = [{ row: r, col: c }];
+    let visited = new Set([keyFor(r, c)]);
+    for (let i = 0; i < queue.length; i++) {
+      let cur = queue[i];
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          if (dr === 0 && dc === 0) continue;
+          let rr = cur.row + dr;
+          let cc = cur.col + dc;
+          if (!inBounds(rr, cc)) continue;
+          if (!hasAnchor(rr, cc, color)) continue;
+          let cellPiece = board[rr][cc];
+          if (!cellPiece || cellPiece.color !== color) {
+            results.push({ row: rr, col: cc });
+          }
+          let k = keyFor(rr, cc);
+          if (!visited.has(k)) {
+            visited.add(k);
+            queue.push({ row: rr, col: cc });
           }
         }
       }
@@ -582,7 +738,7 @@ function getRelayTargets(piece) {
 /* --- Relay path reconstruction --- */
 
 function getRelayPath(piece, destRow, destCol) {
-  // For sliders, path is straight line from piece to dest; all squares must be primed.
+  // For sliders, path is straight line from piece to dest; all squares must be anchored.
   // For knights, we do BFS with parents and reconstruct.
 
   if (piece.type === 'R' || piece.type === 'B' || piece.type === 'Q') {
@@ -590,14 +746,14 @@ function getRelayPath(piece, destRow, destCol) {
     return sliderRelayPath(search, piece, destRow, destCol);
 
   } else if (piece.type === 'N') {
-    // BFS with parents; edges only through our primed squares; destination may be unprimed if a primed square was used.
+    // BFS with parents; edges only through our anchored squares; destination may be unanchored if a anchored square was used.
     let color = piece.color;
     let startKey = keyFor(piece.row, piece.col);
     let startState = `${startKey},0`;
     let targetKey = keyFor(destRow, destCol);
     let parents = {};
     let visited = new Set();
-    let queue = [{ row: piece.row, col: piece.col, usedPrime: false, stateKey: startState }];
+    let queue = [{ row: piece.row, col: piece.col, usedAnchor: false, stateKey: startState }];
     visited.add(startState);
     let knightDeltas = [
       [2,1],[2,-1],[-2,1],[-2,-1],
@@ -612,29 +768,68 @@ function getRelayPath(piece, destRow, destCol) {
         let cc = cur.col + d[1];
         if (!inBounds(rr, cc)) continue;
         let k = keyFor(rr, cc);
-        let cellPrime = primed[rr][cc];
-        let isPrime = cellPrime && cellPrime.color === color;
-        let nextUsedPrime = cur.usedPrime || isPrime;
+        let isAnchor = hasAnchor(rr, cc, color);
+        let nextUsedAnchor = cur.usedAnchor || isAnchor;
 
-        // Destination check (can be unprimed) if we've used at least one prime.
-        if (k === targetKey && nextUsedPrime) {
-          let destStateKey = `${k},${nextUsedPrime ? 1 : 0}`;
+        // Destination check (can be unanchored) if we've used at least one anchor.
+        if (k === targetKey && nextUsedAnchor) {
+          let destStateKey = `${k},${nextUsedAnchor ? 1 : 0}`;
           parents[destStateKey] = cur.stateKey;
           console.log("Knight destination reached, reconstructing via state", destStateKey);
-          return reconstructKnightPrimedPath(destStateKey, startState, parents, color);
+          return reconstructKnightAnchoredPath(destStateKey, startState, parents, color);
         }
 
-        // Only traverse through our primed squares.
-        if (!isPrime) continue;
+        // Only traverse through our anchored squares.
+        if (!isAnchor) continue;
         let nextStateKey = `${k},1`;
         if (visited.has(nextStateKey)) continue;
         visited.add(nextStateKey);
         parents[nextStateKey] = cur.stateKey;
-        console.log("Knight enqueue", { row: rr, col: cc, usedPrime: true, stateKey: nextStateKey });
-        queue.push({ row: rr, col: cc, usedPrime: true, stateKey: nextStateKey });
+        console.log("Knight enqueue", { row: rr, col: cc, usedAnchor: true, stateKey: nextStateKey });
+        queue.push({ row: rr, col: cc, usedAnchor: true, stateKey: nextStateKey });
       }
     }
 
+    return null;
+  } else if (piece.type === 'P') {
+    let search = lastPawnSearch || pawnRelaySearch(piece);
+    return pawnRelayPath(search, piece, destRow, destCol);
+  } else if (piece.type === 'K') {
+    let color = piece.color;
+    let destKey = keyFor(destRow, destCol);
+    let parents = {};
+    let queue = [{ row: piece.row, col: piece.col }];
+    let visited = new Set([keyFor(piece.row, piece.col)]);
+    while (queue.length > 0) {
+      let cur = queue.shift();
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          if (dr === 0 && dc === 0) continue;
+          let rr = cur.row + dr;
+          let cc = cur.col + dc;
+          if (!inBounds(rr, cc)) continue;
+          let k = keyFor(rr, cc);
+          if (visited.has(k)) continue;
+          if (!hasAnchor(rr, cc, color)) continue;
+          let cellPiece = board[rr][cc];
+          if (cellPiece && cellPiece.color === color) continue;
+          parents[k] = keyFor(cur.row, cur.col);
+          if (k === destKey) {
+            let path = [];
+            let walk = k;
+            while (walk !== keyFor(piece.row, piece.col)) {
+              let pos = fromKey(walk);
+              path.push({ row: pos.row, col: pos.col });
+              walk = parents[walk];
+            }
+            path.reverse();
+            return path;
+          }
+          visited.add(k);
+          queue.push({ row: rr, col: cc });
+        }
+      }
+    }
     return null;
   }
 
@@ -643,25 +838,25 @@ function getRelayPath(piece, destRow, destCol) {
 
 /* --- UI helpers --- */
 
-function getPrimeSummary() {
+function getAnchorSummary() {
   let white = 0;
   let black = 0;
   for (let r = 0; r < BOARD_SIZE; r++) {
     for (let c = 0; c < BOARD_SIZE; c++) {
-      let p = primed[r][c];
-      if (!p) continue;
-      if (p.color === 'white') white++;
-      else black++;
+      let p = anchored[r][c];
+      if (!p || p.entries.length === 0) continue;
+      if (p.entries.some(e => e.color === 'white')) white++;
+      if (p.entries.some(e => e.color === 'black')) black++;
     }
   }
-  return `Primed W:${white} B:${black}`;
+  return `Anchored W:${white} B:${black}`;
 }
 
 function drawMoveLog() {
   let logHeight = 200;
   let logWidth = SIDEBAR_WIDTH - 20;
   let x = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
-  let y = 80;
+  let y = 130;
   fill(0, 180);
   noStroke();
   rect(x, y, logWidth, logHeight, 6);
@@ -678,9 +873,72 @@ function drawMoveLog() {
   }
 }
 
+function drawCapturedDrawer() {
+  let drawerWidth = SIDEBAR_WIDTH - 20;
+  let drawerHeight = 140;
+  let x = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
+  let y = 360 + 150; // below mode image
+  fill(200, 200, 200, 200);
+  noStroke();
+  rect(x, y, drawerWidth, drawerHeight, 6);
+
+  let whiteScore = capturedScore('white');
+  let blackScore = capturedScore('black');
+  let delta = whiteScore - blackScore;
+
+  fill(255);
+  textAlign(LEFT, TOP);
+  textSize(12);
+  text("Captured", x + 8, y + 6);
+
+  drawCapturedRow(captured.white, 'white', x + 8, y + 28, delta > 0 ? delta : 0, drawerWidth - 16);
+  drawCapturedRow(captured.black, 'black', x + 8, y + 88, delta < 0 ? -delta : 0, drawerWidth - 16);
+}
+
+function drawCapturedRow(list, color, x, y, deltaDisplay, maxWidth) {
+  // Sort by value descending, pawns last grouped
+  let sorted = [...list].sort((a, b) => {
+    if (a.type === 'P' && b.type !== 'P') return 1;
+    if (b.type === 'P' && a.type !== 'P') return -1;
+    return (PIECE_VALUE[b.type] || 0) - (PIECE_VALUE[a.type] || 0);
+  });
+
+  let size = 22;
+  let padding = 1;
+  let overlapMap = { P: 14, B: 6, N: 6, R: 6, Q: 8, K: 10 };
+  let curX = x;
+
+  // compress if overflow: compute total width and scale overlap accordingly
+  let totalWidth = 0;
+  for (let piece of sorted) {
+    let overlap = overlapMap[piece.type] || 0;
+    totalWidth += size - overlap + padding;
+  }
+  if (totalWidth > maxWidth && sorted.length > 0) {
+    let scale = maxWidth / totalWidth;
+    size = Math.max(16, size * scale);
+    for (let key in overlapMap) overlapMap[key] = overlapMap[key] * scale;
+    padding *= scale;
+  }
+
+  for (let piece of sorted) {
+    drawSpriteAt(piece.type, piece.color, curX, y, size);
+    let overlap = overlapMap[piece.type] || 0;
+    curX += size - overlap + padding;
+  }
+
+  // Place score delta below the row
+  if (deltaDisplay > 0) {
+    fill(color === 'white' ? 0 : 255);
+    textAlign(LEFT, TOP);
+    textSize(12);
+    text(`+${deltaDisplay}`, x, y + size + 6);
+  }
+}
+
 function logAction(piece, destRow, destCol, kind, capturedPiece = null, path = null) {
   let actor = (piece.color === 'white') ? "W" : "B";
-  let moveText = `${actor}${piece.type} ${kind === 'prime' ? 'primes' : 'to'} ${squareName(destRow, destCol)}`;
+  let moveText = `${actor}${piece.type} ${kind === 'anchor' ? 'anchors' : 'to'} ${squareName(destRow, destCol)}`;
   if (kind === 'relay') moveText = `${actor}${piece.type} relay-> ${squareName(destRow, destCol)}`;
   if (capturedPiece) moveText += ` x${capturedPiece.type}`;
   if (path && path.length > 0 && kind === 'relay') {
@@ -701,6 +959,109 @@ function dedupeTargets(targets) {
     out.push(t);
   }
   return out;
+}
+
+/* --- Check / legality helpers --- */
+
+function causesSelfCheck(piece, target) {
+  let simulated = simulateBoardAfterTarget(piece, target);
+  return isKingInCheck(simulated, piece.color);
+}
+
+function simulateBoardAfterTarget(piece, target) {
+  let newBoard = cloneBoard(board);
+  let moving = newBoard[piece.row][piece.col];
+  if (target.type === 'move' || target.type === 'relay') {
+    newBoard[piece.row][piece.col] = null;
+    let destPiece = newBoard[target.row][target.col];
+    // capture handled by overwrite
+    moving.row = target.row;
+    moving.col = target.col;
+    newBoard[target.row][target.col] = moving;
+  } else if (target.type === 'anchor') {
+    // No movement; board unchanged
+  }
+  return newBoard;
+}
+
+function isKingInCheck(b, color) {
+  let kingPos = findKing(b, color);
+  if (!kingPos) return false;
+  return isSquareAttacked(b, kingPos.row, kingPos.col, color === 'white' ? 'black' : 'white');
+}
+
+function findKing(b, color) {
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      let p = b[r][c];
+      if (p && p.type === 'K' && p.color === color) return { row: r, col: c };
+    }
+  }
+  return null;
+}
+
+function isSquareAttacked(b, row, col, attackerColor) {
+  // Pawn attacks
+  let dir = attackerColor === 'white' ? -1 : 1;
+  for (let dc of [-1, 1]) {
+    let rr = row + dir;
+    let cc = col + dc;
+    if (inBounds(rr, cc)) {
+      let p = b[rr][cc];
+      if (p && p.color === attackerColor && p.type === 'P') return true;
+    }
+  }
+  // Knights
+  let knightDeltas = [
+    [2,1],[2,-1],[-2,1],[-2,-1],
+    [1,2],[1,-2],[-1,2],[-1,-2]
+  ];
+  for (let d of knightDeltas) {
+    let rr = row + d[0];
+    let cc = col + d[1];
+    if (!inBounds(rr, cc)) continue;
+    let p = b[rr][cc];
+    if (p && p.color === attackerColor && p.type === 'N') return true;
+  }
+  // Kings (adjacent)
+  for (let dr = -1; dr <= 1; dr++) {
+    for (let dc = -1; dc <= 1; dc++) {
+      if (dr === 0 && dc === 0) continue;
+      let rr = row + dr;
+      let cc = col + dc;
+      if (!inBounds(rr, cc)) continue;
+      let p = b[rr][cc];
+      if (p && p.color === attackerColor && p.type === 'K') return true;
+    }
+  }
+  // Sliding pieces
+  let directions = [
+    [1,0],[-1,0],[0,1],[0,-1],
+    [1,1],[1,-1],[-1,1],[-1,-1]
+  ];
+  for (let d of directions) {
+    let dr = d[0];
+    let dc = d[1];
+    let rr = row + dr;
+    let cc = col + dc;
+    while (inBounds(rr, cc)) {
+      let p = b[rr][cc];
+      if (p) {
+        if (p.color === attackerColor) {
+          if (dr === 0 || dc === 0) { // rook/queen
+            if (p.type === 'R' || p.type === 'Q') return true;
+          }
+          if (dr !== 0 && dc !== 0) { // bishop/queen
+            if (p.type === 'B' || p.type === 'Q') return true;
+          }
+        }
+        break; // blocked
+      }
+      rr += dr;
+      cc += dc;
+    }
+  }
+  return false;
 }
 
 /* --- Utilities --- */
@@ -736,7 +1097,7 @@ function sliderDirections(type) {
 }
 
 function sliderRelaySearch(piece) {
-  // Build graph of reachable primed pivots and collect all relay targets (pivots + full slider moves from pivots).
+  // Build graph of reachable anchored pivots and collect all relay targets (pivots + full slider moves from pivots).
   let color = piece.color;
   let directions = sliderDirections(piece.type);
   let start = { row: piece.row, col: piece.col };
@@ -756,14 +1117,13 @@ function sliderRelaySearch(piece) {
       let dc = d[1];
       let rr = cur.row + dr;
       let cc = cur.col + dc;
-      let firstPrime = null;
+      let firstAnchor = null;
       while (inBounds(rr, cc)) {
         let cellPiece = board[rr][cc];
         if (cellPiece && cellPiece.color === color) break; // own block
-        let cellPrime = primed[rr][cc];
 
-        if (cellPrime && cellPrime.color === color) {
-          firstPrime = { row: rr, col: cc };
+        if (hasAnchor(rr, cc, color)) {
+          firstAnchor = { row: rr, col: cc };
           let key = keyFor(rr, cc);
           if (!pivotKeys.has(key)) {
             pivotKeys.add(key);
@@ -772,8 +1132,8 @@ function sliderRelaySearch(piece) {
           if (!visited.has(key)) {
             visited.add(key);
             parents[key] = curKey;
-            segments[key] = collectPrimedSegment(cur, firstPrime);
-            queue.push(firstPrime);
+            segments[key] = collectAnchoredSegment(cur, firstAnchor);
+            queue.push(firstAnchor);
           }
           if (cellPiece && cellPiece.color !== color) break; // captured piece ends ray
         }
@@ -797,21 +1157,21 @@ function sliderRelaySearch(piece) {
   return { parents, segments, pivotKeys, targets, pivotMoves };
 }
 
-function collectPrimedSegment(from, to) {
-  // Return primed squares along straight line from from(exclusive) to to(inclusive)
+function collectAnchoredSegment(from, to) {
+  // Return anchored squares along straight line from from(exclusive) to to(inclusive)
   let seg = [];
   let dr = Math.sign(to.row - from.row);
   let dc = Math.sign(to.col - from.col);
   let rr = from.row + dr;
   let cc = from.col + dc;
   while (rr !== to.row || cc !== to.col) {
-    if (primed[rr][cc]) {
+    if (anchored[rr][cc] && anchored[rr][cc].entries.length > 0) {
       seg.push({ row: rr, col: cc });
     }
     rr += dr;
     cc += dc;
   }
-  if (primed[to.row][to.col]) seg.push({ row: to.row, col: to.col });
+  if (anchored[to.row][to.col] && anchored[to.row][to.col].entries.length > 0) seg.push({ row: to.row, col: to.col });
   return seg;
 }
 
@@ -845,11 +1205,10 @@ function sliderMovesFrom(r, c, type, color, ignoreRow, ignoreCol) {
 
 function sliderRelayPath(search, piece, destRow, destCol) {
   let color = piece.color;
-  let destPrime = primed[destRow][destCol];
   let destKey = keyFor(destRow, destCol);
   let startKey = keyFor(piece.row, piece.col);
 
-  if (destPrime && destPrime.color === color && search.pivotKeys.has(destKey)) {
+  if (hasAnchor(destRow, destCol, color) && search.pivotKeys.has(destKey)) {
     return reconstructPivotPath(startKey, destKey, search.parents, search.segments, color);
   }
 
@@ -880,22 +1239,288 @@ function reconstructPivotPath(startKey, destKey, parents, segments, color) {
   return path;
 }
 
-function reconstructKnightPrimedPath(destStateKey, startStateKey, parents, color) {
+function reconstructKnightAnchoredPath(destStateKey, startStateKey, parents, color) {
   let path = [];
   let walk = destStateKey;
   while (walk && walk !== startStateKey) {
     let parts = walk.split(",");
     let coord = parts[0] + "," + parts[1];
     let pos = fromKey(coord);
-    if (primed[pos.row][pos.col] && primed[pos.row][pos.col].color === color) {
+    if (hasAnchor(pos.row, pos.col, color)) {
       path.push({ row: pos.row, col: pos.col });
     }
     console.log("Knight path backtrack", walk, "coord", coord);
     walk = parents[walk];
   }
   path.reverse();
-  console.log("Knight primed path collected", path);
+  console.log("Knight anchored path collected", path);
   return path;
+}
+
+/* --- Pawn relay search/path --- */
+
+function pawnRelaySearch(piece) {
+  let color = piece.color;
+  let dir = (color === 'white') ? -1 : 1;
+  let pivots = [];
+  let targets = [];
+  let segments = {};
+  let parents = {};
+  let startKey = keyFor(piece.row, piece.col);
+
+  // march forward collecting anchored squares in file
+  let rr = piece.row + dir;
+  while (inBounds(rr, piece.col)) {
+    let cellAnchor = hasAnchor(rr, piece.col, color);
+    let cellPiece = board[rr][piece.col];
+    if (cellPiece && cellPiece.color === color) break; // own block
+    if (cellAnchor) {
+      let key = keyFor(rr, piece.col);
+      pivots.push(key);
+      segments[key] = collectAnchoredSegment({ row: piece.row, col: piece.col }, { row: rr, col: piece.col });
+      parents[key] = startKey;
+      break; // first anchor forward
+    }
+    if (cellPiece && cellPiece.color !== color) break; // enemy without anchor stops
+    rr += dir;
+  }
+
+  let pivotMoves = {};
+  for (let key of pivots) {
+    let pos = fromKey(key);
+    let moves = pawnMovesFrom(pos.row, pos.col, color);
+    pivotMoves[key] = moves;
+    for (let m of moves) {
+      targets.push({ row: m.row, col: m.col, type: 'relay' });
+    }
+  }
+
+  // also allow landing directly on pivot anchors
+  for (let key of pivots) {
+    let pos = fromKey(key);
+    targets.push({ row: pos.row, col: pos.col, type: 'relay' });
+  }
+
+  return { pivots, segments, parents, pivotMoves, targets };
+}
+
+function pawnMovesFrom(r, c, color) {
+  let moves = [];
+  let dir = (color === 'white') ? -1 : 1;
+  let forward = r + dir;
+  if (inBounds(forward, c) && !board[forward][c]) {
+    moves.push({ row: forward, col: c });
+  }
+  // captures
+  for (let dc of [-1, 1]) {
+    let rr = r + dir;
+    let cc = c + dc;
+    if (!inBounds(rr, cc)) continue;
+    let cellPiece = board[rr][cc];
+    if (cellPiece && cellPiece.color !== color) {
+      moves.push({ row: rr, col: cc });
+    }
+  }
+  return moves;
+}
+
+function pawnRelayPath(search, piece, destRow, destCol) {
+  let destKey = keyFor(destRow, destCol);
+  let startKey = keyFor(piece.row, piece.col);
+  // landing on a pivot anchor
+  if (search.pivots.includes(destKey)) {
+    return search.segments[destKey] || [];
+  }
+  // landing on a move from a pivot
+  for (let pivKey of search.pivots) {
+    let moves = search.pivotMoves[pivKey] || [];
+    if (moves.some(m => m.row === destRow && m.col === destCol)) {
+      return search.segments[pivKey] || [];
+    }
+  }
+  return null;
+}
+
+/* --- History & cloning --- */
+
+function recordHistory() {
+  // truncate forward history
+  if (historyIndex < history.length - 1) {
+    history = history.slice(0, historyIndex + 1);
+  }
+  let snapshot = {
+    board: cloneBoard(board),
+    anchored: cloneAnchored(anchored),
+    captured: {
+      white: captured.white.map(p => ({ type: p.type, color: p.color })),
+      black: captured.black.map(p => ({ type: p.type, color: p.color }))
+    },
+    currentPlayer,
+    moveLog: [...moveLog],
+    anchorMode
+  };
+  history.push(snapshot);
+  historyIndex = history.length - 1;
+}
+
+function applySnapshot(snap) {
+  board = cloneBoard(snap.board);
+  anchored = cloneAnchored(snap.anchored);
+  let cap = snap.captured || { white: [], black: [] };
+  captured = {
+    white: (cap.white || []).map(p => ({ type: p.type, color: p.color })),
+    black: (cap.black || []).map(p => ({ type: p.type, color: p.color }))
+  };
+  currentPlayer = snap.currentPlayer;
+  moveLog = [...snap.moveLog];
+  anchorMode = snap.anchorMode;
+  selectedPiece = null;
+  legalTargets = [];
+  lastSliderSearch = null;
+  updateModeImage();
+}
+
+function undoMove() {
+  if (historyIndex <= 0) return;
+  historyIndex -= 1;
+  applySnapshot(history[historyIndex]);
+}
+
+function redoMove() {
+  if (historyIndex >= history.length - 1) return;
+  historyIndex += 1;
+  applySnapshot(history[historyIndex]);
+}
+
+function cloneBoard(src) {
+  let out = [];
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    out[r] = [];
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      let p = src[r][c];
+      out[r][c] = p ? new Piece(p.type, p.color, p.row, p.col) : null;
+    }
+  }
+  return out;
+}
+
+function cloneAnchored(src) {
+  let out = [];
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    out[r] = [];
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      let p = src[r][c];
+      out[r][c] = { entries: [] };
+      if (p && p.entries) {
+        out[r][c].entries = p.entries.map(e => ({
+          color: e.color,
+          source: { row: e.source.row, col: e.source.col },
+          type: e.type
+        }));
+      }
+    }
+  }
+  return out;
+}
+
+function clearAnchorsFromSource(srcRow, srcCol) {
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      let p = anchored[r][c];
+      if (!p || !p.entries) continue;
+      p.entries = p.entries.filter(e => !(e.source.row === srcRow && e.source.col === srcCol));
+    }
+  }
+}
+
+function addAnchor(row, col, color, piece) {
+  let cell = anchored[row][col];
+  if (!cell) anchored[row][col] = { entries: [] };
+  anchored[row][col].entries.push({
+    color,
+    source: { row: piece.row, col: piece.col },
+    type: piece.type
+  });
+}
+
+function hasAnchor(row, col, color) {
+  let cell = anchored[row][col];
+  if (!cell || !cell.entries) return false;
+  return cell.entries.some(e => e.color === color);
+}
+
+function consumeAnchorColor(row, col, color) {
+  let cell = anchored[row][col];
+  if (!cell || !cell.entries) return;
+  cell.entries = cell.entries.filter(e => e.color !== color);
+}
+
+function reconcileAnchoredOnOccupant(row, col) {
+  let occ = board[row][col];
+  let cell = anchored[row][col];
+  if (!cell || !cell.entries || !occ) return;
+  cell.entries = cell.entries.filter(e => {
+    if (e.color === occ.color) return true; // own anchors stay
+    return canSourceCaptureEntry(e, row, col, occ);
+  });
+}
+
+function canSourceCaptureEntry(entry, targetRow, targetCol, targetPiece) {
+  let type = entry.type;
+  let color = entry.color;
+  let sr = entry.source.row;
+  let sc = entry.source.col;
+  return canPieceCaptureFrom(type, color, sr, sc, targetRow, targetCol);
+}
+
+function canPieceCaptureFrom(type, color, sr, sc, tr, tc) {
+  if (!inBounds(tr, tc)) return false;
+  let dr = tr - sr;
+  let dc = tc - sc;
+  if (type === 'P') {
+    let dir = (color === 'white') ? -1 : 1;
+    if (dr === dir && Math.abs(dc) === 1) return true;
+    return false;
+  } else if (type === 'N') {
+    let deltas = [
+      [2,1],[2,-1],[-2,1],[-2,-1],
+      [1,2],[1,-2],[-1,2],[-1,-2]
+    ];
+    return deltas.some(d => d[0] === dr && d[1] === dc);
+  } else if (type === 'K') {
+    return Math.abs(dr) <= 1 && Math.abs(dc) <= 1;
+  } else if (type === 'R' || type === 'B' || type === 'Q') {
+    let dirs = sliderDirections(type);
+    for (let d of dirs) {
+      let stepR = d[0];
+      let stepC = d[1];
+      let rr = sr + stepR;
+      let cc = sc + stepC;
+      while (inBounds(rr, cc)) {
+        if (rr === tr && cc === tc) return true;
+        if (board[rr][cc]) break;
+        rr += stepR;
+        cc += stepC;
+      }
+    }
+    return false;
+  }
+  return false;
+}
+
+function updateModeImage() {
+  if (modeImg) {
+    modeImg.attribute('src', anchorMode ? 'anchormode.png' : 'movemode.png');
+  }
+}
+
+function addCapture(capturingColor, piece) {
+  if (!captured[capturingColor]) captured[capturingColor] = [];
+  captured[capturingColor].push({ type: piece.type, color: piece.color });
+}
+
+function capturedScore(color) {
+  return captured[color].reduce((sum, p) => sum + (PIECE_VALUE[p.type] || 0), 0);
 }
 
 </script>
