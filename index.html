@@ -34,7 +34,7 @@ const BOARD_ORIGIN_Y = LABEL_MARGIN;
 let tileSize;
 let spriteSheet;
 let board;        // [row][col] = piece or null
-let anchored;       // [row][col] = { color: 'white'|'black', charge: 1 } or null
+let anchored;       // [row][col] = 'white' | 'black' | null
 let currentPlayer = 'white';
 let selectedPiece = null;
 let legalTargets = [];   // array of {row, col, type: 'move' | 'relay' | 'anchor'}
@@ -47,6 +47,7 @@ let historyIndex = -1;
 let undoBtn, redoBtn, resetBtn, modeImg;
 let captured;
 let enPassantTarget = null; // {row,col,color} where a pawn just passed
+let anchorWhiteImg, anchorBlackImg;
 
 const PIECE_VALUE = { P:1, N:3, B:3, R:5, Q:9, K:0 };
 
@@ -62,6 +63,8 @@ class Piece {
 
 function preload() {
   spriteSheet = loadImage('piecesprite.svg');
+  anchorWhiteImg = loadImage('anchorwhite.png');
+  anchorBlackImg = loadImage('anchorblack.png');
 }
 
 function setup() {
@@ -80,7 +83,7 @@ function initGame() {
     anchored[r] = [];
     for (let c = 0; c < BOARD_SIZE; c++) {
       board[r][c] = null;
-      anchored[r][c] = { entries: [] }; // entries: [{ color, source:{row,col}, type }]
+      anchored[r][c] = null;
     }
   }
 
@@ -133,7 +136,6 @@ function draw() {
   background(220);
   drawBoard();
   drawAnchoredSquares();
-  drawAnchorArrows();
   drawPieces();
   drawHighlights();
   drawCoordinates();
@@ -156,66 +158,13 @@ function drawAnchoredSquares() {
   for (let r = 0; r < BOARD_SIZE; r++) {
     for (let c = 0; c < BOARD_SIZE; c++) {
       let p = anchored[r][c];
-      if (!p || p.entries.length === 0) continue;
-      let hasWhite = p.entries.some(e => e.color === 'white');
-      let hasBlack = p.entries.some(e => e.color === 'black');
-      if (hasWhite && hasBlack) fill(200, 150, 200, 160);
-      else if (hasWhite) fill(100, 180, 255, 140); // light blue
-      else fill(255, 120, 120, 140); // light red
-      noStroke();
-      rect(BOARD_ORIGIN_X + c * tileSize, BOARD_ORIGIN_Y + r * tileSize, tileSize, tileSize);
-
-      // indicator count
-      fill(0);
-      textSize(tileSize * 0.25);
-      textAlign(RIGHT, TOP);
-      let wCount = p.entries.filter(e => e.color === 'white').length;
-      let bCount = p.entries.filter(e => e.color === 'black').length;
-      let label = '';
-      if (wCount > 0) label += wCount;
-      if (bCount > 0) label += (label ? '/' : '') + bCount;
-      text(label, BOARD_ORIGIN_X + (c + 1) * tileSize - 4, BOARD_ORIGIN_Y + r * tileSize + 4);
-    }
-  }
-}
-
-function drawAnchorArrows() {
-  strokeWeight(3);
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      let p = anchored[r][c];
-      if (!p || p.entries.length === 0) continue;
-      for (let entry of p.entries) {
-        let src = entry.source;
-        let srcPiece = board[src.row]?.[src.col];
-        if (!srcPiece || srcPiece.color !== entry.color) continue;
-        let sx = BOARD_ORIGIN_X + (src.col + 0.5) * tileSize;
-        let sy = BOARD_ORIGIN_Y + (src.row + 0.5) * tileSize;
-        let dx = BOARD_ORIGIN_X + (c + 0.5) * tileSize;
-        let dy = BOARD_ORIGIN_Y + (r + 0.5) * tileSize;
-        if (entry.color === 'white') stroke(255, 255, 255, 255);
-        else stroke(0, 0, 0, 255);
-        line(sx, sy, dx, dy);
-        // arrowhead
-        let angle = atan2(dy - sy, dx - sx);
-        let ah = 10;
-        line(
-          dx,
-          dy,
-          dx - ah * cos(angle - PI / 8),
-          dy - ah * sin(angle - PI / 8)
-        );
-        line(
-          dx,
-          dy,
-          dx - ah * cos(angle + PI / 8),
-          dy - ah * sin(angle + PI / 8)
-        );
+      if (!p) continue;
+      let img = p === 'white' ? anchorWhiteImg : anchorBlackImg;
+      if (img) {
+        image(img, BOARD_ORIGIN_X + c * tileSize, BOARD_ORIGIN_Y + r * tileSize, tileSize, tileSize);
       }
     }
   }
-  strokeWeight(1);
-  stroke(0);
 }
 
 function drawPieces() {
@@ -333,7 +282,7 @@ function drawUIOverlay() {
   fill(255);
   textAlign(LEFT, TOP);
   textSize(14);
-  let modeText = anchorMode ? "Anchor Mode (P to switch)" : "Move Mode (P to switch)";
+  let modeText = anchorMode ? "Anchor Mode (space to switch)" : "Move Mode (space to switch)";
   let turnText = "Turn: " + (currentPlayer === 'white' ? "White" : "Black");
   let anchorSummary = getAnchorSummary();
   text(turnText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 10);
@@ -398,7 +347,7 @@ function mousePressed() {
 
 
 function keyPressed() {
-  if (key === 'p' || key === 'P') {
+  if (key === ' ' || key === ' ') {
     anchorMode = !anchorMode;
     updateModeImage();
     if (selectedPiece) computeLegalTargets();
@@ -473,6 +422,7 @@ function doAnchor(piece, destRow, destCol) {
   anchorMode = false;
   updateModeImage();
 
+  pruneAnchors();
   endTurn();
 }
 
@@ -598,18 +548,18 @@ function getStandardMoves(piece) {
       }
     }
 
-    // Captures
-    for (let dc of [-1, 1]) {
-      let rr = r + dir;
-      let cc = c + dc;
-      if (inBounds(rr, cc) && board[rr][cc] && board[rr][cc].color !== color) {
-        moves.push({ row: rr, col: cc });
-      }
-      // En passant capture
-      if (enPassantTarget && enPassantTarget.row === rr && enPassantTarget.col === cc && enPassantTarget.color !== color) {
-        moves.push({ row: rr, col: cc, enPassant: true });
-      }
+  // Captures
+  for (let dc of [-1, 1]) {
+    let rr = r + dir;
+    let cc = c + dc;
+    if (inBounds(rr, cc) && board[rr][cc] && board[rr][cc].color !== color) {
+      moves.push({ row: rr, col: cc });
     }
+    // En passant capture
+    if (enPassantTarget && enPassantTarget.row === rr && enPassantTarget.col === cc && enPassantTarget.color !== color) {
+      moves.push({ row: rr, col: cc, enPassant: true });
+    }
+  }
 
   } else if (piece.type === 'R') {
     moves.push(...slideMoves(r, c, color, [[1,0],[-1,0],[0,1],[0,-1]]));
@@ -687,7 +637,7 @@ function getRelayTargets(piece) {
   // For this prototype:
   //   R, B, Q: chain through your anchored squares; can pivot at any anchored node (queen can pivot to any of its 8 dirs)
   //   N: BFS chaining through anchored knight-squares; destination may be unanchored but chain must include at least one anchored square
-  //   P: relay forward through anchored squares; then can make a standard pawn move/capture from that anchored pivot (2-turn equivalent)
+  //   P: relay forward through anchored squares; then can make a standard pawn move from pivot; can use diagonal anchored pivot only for capture
   //   K: stepwise BFS through adjacent anchored squares; destination must be anchored
   let r = piece.row;
   let c = piece.col;
@@ -882,9 +832,9 @@ function getAnchorSummary() {
   for (let r = 0; r < BOARD_SIZE; r++) {
     for (let c = 0; c < BOARD_SIZE; c++) {
       let p = anchored[r][c];
-      if (!p || p.entries.length === 0) continue;
-      if (p.entries.some(e => e.color === 'white')) white++;
-      if (p.entries.some(e => e.color === 'black')) black++;
+      if (!p) continue;
+      if (p === 'white') white++;
+      else if (p === 'black') black++;
     }
   }
   return `Anchored W:${white} B:${black}`;
@@ -1211,13 +1161,13 @@ function collectAnchoredSegment(from, to) {
   let rr = from.row + dr;
   let cc = from.col + dc;
   while (rr !== to.row || cc !== to.col) {
-    if (anchored[rr][cc] && anchored[rr][cc].entries.length > 0) {
+    if (anchored[rr][cc]) {
       seg.push({ row: rr, col: cc });
     }
     rr += dr;
     cc += dc;
   }
-  if (anchored[to.row][to.col] && anchored[to.row][to.col].entries.length > 0) seg.push({ row: to.row, col: to.col });
+  if (anchored[to.row][to.col]) seg.push({ row: to.row, col: to.col });
   return seg;
 }
 
@@ -1366,6 +1316,10 @@ function pawnMovesFrom(r, c, color) {
     if (cellPiece && cellPiece.color !== color) {
       moves.push({ row: rr, col: cc });
     }
+    // allow anchored diagonal pivot for capture relay
+    if (anchored[rr][cc] === color) {
+      moves.push({ row: rr, col: cc, captureOnly: true });
+    }
   }
   return moves;
 }
@@ -1463,68 +1417,31 @@ function cloneAnchored(src) {
   for (let r = 0; r < BOARD_SIZE; r++) {
     out[r] = [];
     for (let c = 0; c < BOARD_SIZE; c++) {
-      let p = src[r][c];
-      out[r][c] = { entries: [] };
-      if (p && p.entries) {
-        out[r][c].entries = p.entries.map(e => ({
-          color: e.color,
-          source: { row: e.source.row, col: e.source.col },
-          type: e.type
-        }));
-      }
+      out[r][c] = src[r][c];
     }
   }
   return out;
 }
 
 function clearAnchorsFromSource(srcRow, srcCol) {
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      let p = anchored[r][c];
-      if (!p || !p.entries) continue;
-      p.entries = p.entries.filter(e => !(e.source.row === srcRow && e.source.col === srcCol));
-    }
-  }
+  // shared anchors; nothing to clear by source
 }
 
 function addAnchor(row, col, color, piece) {
-  let cell = anchored[row][col];
-  if (!cell) anchored[row][col] = { entries: [] };
-  anchored[row][col].entries.push({
-    color,
-    source: { row: piece.row, col: piece.col },
-    type: piece.type
-  });
+  if (board[row][col]) return; // cannot anchor on occupied
+  anchored[row][col] = color;
 }
 
 function hasAnchor(row, col, color) {
-  let cell = anchored[row][col];
-  if (!cell || !cell.entries) return false;
-  return cell.entries.some(e => e.color === color);
+  return anchored[row][col] === color;
 }
 
 function consumeAnchorColor(row, col, color) {
-  let cell = anchored[row][col];
-  if (!cell || !cell.entries) return;
-  cell.entries = cell.entries.filter(e => e.color !== color);
+  if (anchored[row][col] === color) anchored[row][col] = null;
 }
 
 function reconcileAnchoredOnOccupant(row, col) {
-  let occ = board[row][col];
-  let cell = anchored[row][col];
-  if (!cell || !cell.entries || !occ) return;
-  cell.entries = cell.entries.filter(e => {
-    if (e.color === occ.color) return true; // own anchors stay
-    return canSourceCaptureEntry(e, row, col, occ);
-  });
-}
-
-function canSourceCaptureEntry(entry, targetRow, targetCol, targetPiece) {
-  let type = entry.type;
-  let color = entry.color;
-  let sr = entry.source.row;
-  let sc = entry.source.col;
-  return canPieceCaptureFrom(type, color, sr, sc, targetRow, targetCol);
+  if (anchored[row][col]) anchored[row][col] = null;
 }
 
 function canPieceCaptureFrom(type, color, sr, sc, tr, tc) {
@@ -1578,41 +1495,48 @@ function capturedScore(color) {
 }
 
 function clearAnchorsOnPathCollision(piece, destRow, destCol) {
-  // remove any anchor entries whose straight-line path to source is now blocked by this moved piece
+  pruneAnchors();
+}
+
+function pruneAnchors() {
   for (let r = 0; r < BOARD_SIZE; r++) {
     for (let c = 0; c < BOARD_SIZE; c++) {
-      let cell = anchored[r][c];
-      if (!cell || !cell.entries || cell.entries.length === 0) continue;
-      cell.entries = cell.entries.filter(e => {
-        // only sliders care about path; knights/king/pawn anchors drop if occupied directly (handled elsewhere)
-        if (e.source.row === destRow && e.source.col === destCol) return true;
-        let type = e.type;
-        if (type === 'N' || type === 'K' || type === 'P') {
-          // if the anchor square is now occupied by any piece, drop anchors of these types
-          if (r === destRow && c === destCol) return false;
-          return true;
-        }
-        if (type === 'R' || type === 'B' || type === 'Q') {
-          let dr = Math.sign(e.source.row - r);
-          let dc = Math.sign(e.source.col - c);
-          // ensure same line
-          if (dr !== 0 && dc !== 0 && Math.abs(e.source.row - r) !== Math.abs(e.source.col - c)) return true;
-          if (dr === 0 && dc === 0) return true;
-          let rr = r + dr;
-          let cc = c + dc;
-          while (rr !== e.source.row || cc !== e.source.col) {
-            if (rr === destRow && cc === destCol) return false; // blocked
-            if (board[rr][cc] && !(rr === piece.row && cc === piece.col)) {
-              return true; // blocked by existing piece
-            }
-            rr += dr;
-            cc += dc;
-          }
-        }
-        return true;
-      });
+      let owner = anchored[r][c];
+      if (!owner) continue;
+      if (board[r][c]) { anchored[r][c] = null; continue; }
+      if (!anyPieceCanReach(owner, r, c)) {
+        anchored[r][c] = null;
+      }
     }
   }
+}
+
+function anyPieceCanReach(color, targetRow, targetCol) {
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      let p = board[r][c];
+      if (!p || p.color !== color) continue;
+      if (pieceCanReachSquare(p, targetRow, targetCol)) return true;
+    }
+  }
+  return false;
+}
+
+function pieceCanReachSquare(piece, tr, tc) {
+  // Use standard moves only (no anchors), respecting blockers
+  let moves = getStandardMoves(piece);
+  for (let m of moves) {
+    if (m.row === tr && m.col === tc) {
+      if (piece.type === 'P' && m.captureOnly) {
+        // require enemy piece present
+        let targetPiece = board[tr][tc];
+        if (targetPiece && targetPiece.color !== piece.color) return true;
+        continue;
+      }
+      return true;
+    }
+  }
+  return false;
 }
 
 /* --- Castling helpers --- */
