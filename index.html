@@ -34,6 +34,9 @@ const BOARD_ORIGIN_Y = LABEL_MARGIN;
 const MODE_IMG_Y = 320;
 const MODE_IMG_W = 180;
 const MODE_IMG_H = 120;
+const BUTTON_Y = 46;
+const BUTTON_H = 26;
+const BUTTON_GAP = 10;
 let tileSize;
 let spriteSheet;
 let board;        // [row][col] = piece or null
@@ -356,7 +359,8 @@ function drawUIOverlay() {
   text("You: " + playerName + (playerColor ? " (" + playerColor + ")" : ""), sidebarX, 30);
   let modeText = anchorMode ? "Anchor Mode (space to switch)" : "Move Mode (space to switch)";
   let turnText = "Turn: " + (currentPlayer === 'white' ? whiteName : blackName);
-  text(turnText, sidebarX, 98);
+  const buttonBlockBottom = BUTTON_Y + BUTTON_H * 2 + BUTTON_GAP;
+  text(turnText, sidebarX, buttonBlockBottom + 10);
   // Mode label sits beneath the mode image
   const modeTextY = MODE_IMG_Y + MODE_IMG_H + 6;
   text(modeText, sidebarX, modeTextY);
@@ -499,10 +503,10 @@ function keyPressed() {
 
 function setupUIButtons() {
   const sidebarX = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
-  const btnY = 46;
-  const gap = 10;
+  const btnY = BUTTON_Y;
+  const gap = BUTTON_GAP;
   const btnW = (SIDEBAR_WIDTH - (gap * 3)) / 2; // two columns with gaps
-  const btnH = 26;
+  const btnH = BUTTON_H;
   undoBtn = createButton('⟵ Back');
   undoBtn.position(sidebarX, btnY);
   undoBtn.size(btnW, btnH);
@@ -1139,7 +1143,7 @@ function drawMoveLog() {
   let logHeight = 200;
   let logWidth = SIDEBAR_WIDTH - 20;
   let x = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
-  let y = 90;
+  let y = BUTTON_Y + BUTTON_H * 2 + BUTTON_GAP + 24;
   fill(0, 180);
   noStroke();
   rect(x, y, logWidth, logHeight, 6);
