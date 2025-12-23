@@ -374,6 +374,12 @@ function mousePressed() {
       return;
     }
   }
+  if (playerColor && playerColor !== currentPlayer) {
+    // Respect turn ownership: only the side to move can act
+    selectedPiece = null;
+    legalTargets = [];
+    return;
+  }
   let col = floor((mouseX - BOARD_ORIGIN_X) / tileSize);
   let row = floor((mouseY - BOARD_ORIGIN_Y) / tileSize);
   if (
