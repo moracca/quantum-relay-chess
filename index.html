@@ -498,24 +498,25 @@ function keyPressed() {
 }
 
 function setupUIButtons() {
-  const btnX = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
+  const sidebarX = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
   const btnY = 46;
-  const btnW = 90;
+  const gap = 10;
+  const btnW = (SIDEBAR_WIDTH - (gap * 3)) / 2; // two columns with gaps
   const btnH = 26;
   undoBtn = createButton('⟵ Back');
-  undoBtn.position(btnX, btnY);
+  undoBtn.position(sidebarX, btnY);
   undoBtn.size(btnW, btnH);
   undoBtn.mousePressed(undoMove);
   redoBtn = createButton('Forward ⟶');
-  redoBtn.position(btnX + btnW + 8, btnY);
+  redoBtn.position(sidebarX + btnW + gap, btnY);
   redoBtn.size(btnW, btnH);
   redoBtn.mousePressed(redoMove);
   resetBtn = createButton('Restart');
-  resetBtn.position(btnX, btnY + btnH + 8);
+  resetBtn.position(sidebarX, btnY + btnH + gap);
   resetBtn.size(btnW, btnH);
   resetBtn.mousePressed(initGame);
   helpBtn = createButton('How to play?');
-  helpBtn.position(btnX + btnW + 8, btnY + btnH + 8);
+  helpBtn.position(sidebarX + btnW + gap, btnY + btnH + gap);
   helpBtn.size(btnW, btnH);
   helpBtn.mousePressed(() => { showModal = true; modalJustOpened = true; });
   [undoBtn, redoBtn, resetBtn, helpBtn].forEach(btn => {
@@ -525,6 +526,7 @@ function setupUIButtons() {
     btn.style('border', '1px solid #999');
     btn.style('background', '#f4f4f4');
     btn.style('cursor', 'pointer');
+    btn.style('position', 'absolute');
   });
   const modeImgX = BOARD_ORIGIN_X + BOARD_PIXELS + 17;
 
