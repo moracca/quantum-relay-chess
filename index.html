@@ -31,13 +31,15 @@ const LABEL_MARGIN = 18;
 const SIDEBAR_WIDTH = 200;
 const BOARD_ORIGIN_X = LABEL_MARGIN;
 const BOARD_ORIGIN_Y = LABEL_MARGIN;
-const MODE_IMG_Y = 340;
+const MODE_IMG_Y = 320;
 const MODE_IMG_W = 180;
 const MODE_IMG_H = 120;
 let tileSize;
 let spriteSheet;
 let board;        // [row][col] = piece or null
 let anchored;       // [row][col] = 'white' | 'black' | null
+let whiteName = "White";
+let blackName = "Gold";
 let currentPlayer = 'white';
 let selectedPiece = null;
 let legalTargets = [];   // array of {row, col, type: 'move' | 'relay' | 'anchor'}
@@ -52,6 +54,11 @@ let captured;
 let enPassantTarget = null; // {row,col,color} where a pawn just passed
 let anchorWhiteImg, anchorBlackImg;
 let anchorPool = { white: 4, black: 4 };
+let helpBtn;
+let showModal = false;
+let modalJustOpened = false;
+let promotionPending = null;
+let lastMoveSquare = null;
 
 const PIECE_VALUE = { P:1, N:3, B:3, R:5, Q:9, K:0 };
 
@@ -66,7 +73,8 @@ class Piece {
 }
 
 function preload() {
-  spriteSheet = loadImage('piecesprite.svg');
+  // spriteSheet = loadImage('piecesprite.png');
+  spriteSheet = loadImage('piecespritegold.png');
   anchorWhiteImg = loadImage('anchorwhite.png');
   anchorBlackImg = loadImage('anchorblack.png');
 }
@@ -123,6 +131,7 @@ function initGame() {
   legalTargets = [];
   anchorMode = false;
   moveLog = [];
+  lastMoveSquare = null;
   history = [];
   historyIndex = -1;
   lastSliderSearch = null;
@@ -140,11 +149,14 @@ function placePiece(piece) {
 function draw() {
   background(220);
   drawBoard();
+  drawLastMoveHighlight();
   drawAnchoredSquares();
   drawPieces();
   drawHighlights();
   drawCoordinates();
   drawUIOverlay();
+  if (showModal) drawHelpModal();
+  if (promotionPending) drawPromotionModal();
 }
 
 function drawBoard() {
@@ -190,8 +202,8 @@ function drawSprite(piece, r, c) {
   const SPRITE_COLS = 6;
   const SPRITE_ROWS = 2;
   const SPRITE_MAP = {
-    white: { K: [0,0], Q: [1,0], B: [2,0], N: [3,0], R: [4,0], P: [5,0] },
-    black: { K: [0,1], Q: [1,1], B: [2,1], N: [3,1], R: [4,1], P: [5,1] }
+    white: { K: [0,0], Q: [1,0], B: [4,0], N: [3,0], R: [2,0], P: [5,0] },
+    black: { K: [0,1], Q: [1,1], B: [4,1], N: [3,1], R: [2,1], P: [5,1] }
   };
   let [sxIdx, syIdx] = SPRITE_MAP[piece.color][piece.type];
   let sw = spriteSheet.width / SPRITE_COLS;
@@ -262,6 +274,18 @@ function drawHighlights() {
   }
 }
 
+function drawLastMoveHighlight() {
+  if (!lastMoveSquare) return;
+  noStroke();
+  fill(255, 250, 180, 180);
+  rect(
+    BOARD_ORIGIN_X + lastMoveSquare.col * tileSize,
+    BOARD_ORIGIN_Y + lastMoveSquare.row * tileSize,
+    tileSize,
+    tileSize
+  );
+}
+
 function drawCoordinates() {
   fill(0, 120);
   noStroke();
@@ -288,10 +312,12 @@ function drawUIOverlay() {
   textAlign(LEFT, TOP);
   textSize(14);
   let modeText = anchorMode ? "Anchor Mode (space to switch)" : "Move Mode (space to switch)";
-  let turnText = "Turn: " + (currentPlayer === 'white' ? "White" : "Black");
-  text(turnText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 10);
-  text(modeText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 28);
-  drawAnchorPoolIcons(BOARD_ORIGIN_X + BOARD_PIXELS + 10, MODE_IMG_Y + MODE_IMG_H + 4);
+  let turnText = "Turn: " + (currentPlayer === 'white' ? whiteName : blackName);
+  text(turnText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 70);
+  // Mode label sits beneath the mode image
+  const modeTextY = MODE_IMG_Y + MODE_IMG_H + 6;
+  text(modeText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, modeTextY);
+  drawAnchorPoolIcons(BOARD_ORIGIN_X + BOARD_PIXELS + 10, modeTextY + 18);
 
   drawMoveLog();
   drawCapturedDrawer();
@@ -324,6 +350,19 @@ function drawPoolRow(color, x, y, size, gap) {
 }
 
 function mousePressed() {
+  if (showModal) {
+    if (modalJustOpened) {
+      modalJustOpened = false;
+      return;
+    }
+    showModal = false;
+    return;
+  }
+  if (promotionPending) {
+    if (handlePromotionClick(mouseX, mouseY)) {
+      return;
+    }
+  }
   let col = floor((mouseX - BOARD_ORIGIN_X) / tileSize);
   let row = floor((mouseY - BOARD_ORIGIN_Y) / tileSize);
   if (
@@ -338,9 +377,30 @@ function mousePressed() {
   if (anchorMode && anchored[row][col] === currentPlayer && (!selectedPiece || !clickedPiece)) {
     anchored[row][col] = null;
     anchorPool[currentPlayer] = Math.min(anchorPool[currentPlayer] + 1, 4);
+    lastMoveSquare = null;
     selectedPiece = null;
     legalTargets = [];
     pruneAnchors();
+    endTurn();
+    return;
+  }
+
+  // In anchor mode: clicking an opponent anchor flips it if we can legally reach it (uses the turn).
+  if (anchorMode && anchored[row][col] && anchored[row][col] !== currentPlayer && (!selectedPiece || !clickedPiece)) {
+    if (activeAnchorCount(currentPlayer) >= 4) return;
+    if (anyPieceCanReach(currentPlayer, row, col, true)) {
+      let prevOwner = anchored[row][col];
+      anchored[row][col] = currentPlayer;
+      refundAnchor(prevOwner);
+      logAnchorFlip(row, col, prevOwner, currentPlayer);
+      lastMoveSquare = null;
+      selectedPiece = null;
+      legalTargets = [];
+      pruneAnchors();
+      anchorMode = false;
+      updateModeImage();
+      endTurn();
+    }
     return;
   }
 
@@ -394,8 +454,8 @@ function keyPressed() {
 }
 
 function setupUIButtons() {
-  const btnX = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
-  const btnY = 70;
+  const btnX = BOARD_ORIGIN_X + BOARD_PIXELS + 30;
+  const btnY = 20;
   undoBtn = createButton('⟵ Back');
   undoBtn.position(btnX, btnY);
   undoBtn.mousePressed(undoMove);
@@ -405,8 +465,13 @@ function setupUIButtons() {
   resetBtn = createButton('Restart');
   resetBtn.position(btnX, btnY + 26);
   resetBtn.mousePressed(initGame);
+  helpBtn = createButton('How to play?');
+  helpBtn.position(btnX + 70, btnY + 26);
+  helpBtn.mousePressed(() => { showModal = true; modalJustOpened = true; });
+  const modeImgX = BOARD_ORIGIN_X + BOARD_PIXELS + 17;
+
   modeImg = createImg('movemode.png', 'mode toggle');
-  modeImg.position(btnX+10, MODE_IMG_Y);
+  modeImg.position(modeImgX, MODE_IMG_Y);
   modeImg.size(MODE_IMG_W, MODE_IMG_H);
   modeImg.mousePressed(() => {
     anchorMode = !anchorMode;
@@ -448,8 +513,11 @@ function doMove(piece, destRow, destCol) {
   piece.col = destCol;
   piece.moved = true;
   board[destRow][destCol] = piece;
+  lastMoveSquare = { row: destRow, col: destCol };
   reconcileAnchoredOnOccupant(destRow, destCol);
   clearAnchorsOnPathCollision(piece, destRow, destCol);
+
+  if (checkPromotion(piece)) return;
 
   endTurn();
 }
@@ -459,6 +527,7 @@ function doAnchor(piece, destRow, destCol) {
   addAnchor(destRow, destCol, currentPlayer, piece);
   anchorPool[currentPlayer] -= 1;
   logAction(piece, destRow, destCol, "anchor");
+  lastMoveSquare = null;
 
   // After priming, drop back to move mode to avoid accidental re-priming next turn.
   anchorMode = false;
@@ -501,8 +570,11 @@ function doRelayMove(piece, destRow, destCol) {
   piece.col = destCol;
   piece.moved = true;
   board[destRow][destCol] = piece;
+  lastMoveSquare = { row: destRow, col: destCol };
   reconcileAnchoredOnOccupant(destRow, destCol);
   clearAnchorsOnPathCollision(piece, destRow, destCol);
+
+  if (checkPromotion(piece)) return;
 
   endTurn();
 }
@@ -543,6 +615,17 @@ function computeLegalTargets() {
           col: m.col,
           type: 'anchor'
         });
+      }
+    }
+    // Pawns may also anchor on diagonal attack squares even if empty
+    if (piece.type === 'P') {
+      let dir = piece.color === 'white' ? -1 : 1;
+      for (let dc of [-1, 1]) {
+        let rr = piece.row + dir;
+        let cc = piece.col + dc;
+        if (inBounds(rr, cc) && !board[rr][cc]) {
+          legalTargets.push({ row: rr, col: cc, type: 'anchor' });
+        }
       }
     }
   }
@@ -876,7 +959,7 @@ function drawMoveLog() {
   let logHeight = 200;
   let logWidth = SIDEBAR_WIDTH - 20;
   let x = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
-  let y = 120;
+  let y = 90;
   fill(0, 180);
   noStroke();
   rect(x, y, logWidth, logHeight, 6);
@@ -897,7 +980,7 @@ function drawCapturedDrawer() {
   let drawerWidth = SIDEBAR_WIDTH - 20;
   let drawerHeight = 140;
   let x = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
-  let y = MODE_IMG_Y + MODE_IMG_H + 60; // below mode image and anchor pool
+  let y = MODE_IMG_Y + MODE_IMG_H + 85; // below mode image and anchor pool
   fill(200, 200, 200, 200);
   noStroke();
   rect(x, y, drawerWidth, drawerHeight, 6);
@@ -957,15 +1040,29 @@ function drawCapturedRow(list, color, x, y, deltaDisplay, maxWidth) {
 }
 
 function logAction(piece, destRow, destCol, kind, capturedPiece = null, path = null) {
-  let actor = (piece.color === 'white') ? "W" : "B";
+  console.log(piece.color )
+  let actor = (piece.color === 'white')
+    ? (whiteName ? whiteName.charAt(0).toUpperCase() : 'W')
+    : (blackName ? blackName.charAt(0).toUpperCase() : 'B');
   let moveText = `${actor}${piece.type} ${kind === 'anchor' ? 'anchors' : 'to'} ${squareName(destRow, destCol)}`;
   if (kind === 'relay') moveText = `${actor}${piece.type} relay-> ${squareName(destRow, destCol)}`;
+  if (kind === 'promote') moveText = `${actor}${piece.type} promotes on ${squareName(destRow, destCol)}`;
   if (capturedPiece) moveText += ` x${capturedPiece.type}`;
   if (path && path.length > 0 && kind === 'relay') {
     let used = path.map(sq => squareName(sq.row, sq.col)).join("->");
     moveText += ` via ${used}`;
   }
   moveLog.push(moveText);
+  if (moveLog.length > 30) moveLog.shift();
+}
+
+function logAnchorFlip(row, col, from, to) {
+  let color = (to === 'white') ? whiteName[0] : blackName[0];
+  let fromColor = (from === 'white')
+    ? (whiteName ? whiteName.charAt(0).toUpperCase() : 'W')
+    : (blackName ? blackName.charAt(0).toUpperCase() : 'B');
+  let txt = `${color} flips ${fromColor} anchor on ${squareName(row, col)}`;
+  moveLog.push(txt);
   if (moveLog.length > 30) moveLog.shift();
 }
 
@@ -1391,7 +1488,8 @@ function recordHistory() {
     moveLog: [...moveLog],
     anchorMode,
     enPassantTarget: enPassantTarget ? { ...enPassantTarget } : null,
-    anchorPool: { ...anchorPool }
+    anchorPool: { ...anchorPool },
+    lastMoveSquare: lastMoveSquare ? { ...lastMoveSquare } : null
   };
   history.push(snapshot);
   historyIndex = history.length - 1;
@@ -1410,6 +1508,7 @@ function applySnapshot(snap) {
   anchorMode = snap.anchorMode;
   enPassantTarget = snap.enPassantTarget ? { ...snap.enPassantTarget } : null;
   anchorPool = snap.anchorPool ? { white: snap.anchorPool.white, black: snap.anchorPool.black } : { white: 4, black: 4 };
+  lastMoveSquare = snap.lastMoveSquare ? { ...snap.lastMoveSquare } : null;
   selectedPiece = null;
   legalTargets = [];
   lastSliderSearch = null;
@@ -1544,7 +1643,7 @@ function pruneAnchors() {
       let owner = anchored[r][c];
       if (!owner) continue;
       if (board[r][c]) { refundAnchor(owner); anchored[r][c] = null; continue; }
-      if (!anyPieceCanReach(owner, r, c)) {
+      if (!anyPieceCanReach(owner, r, c, true)) {
         refundAnchor(owner);
         anchored[r][c] = null;
       }
@@ -1552,26 +1651,49 @@ function pruneAnchors() {
   }
 }
 
-function anyPieceCanReach(color, targetRow, targetCol) {
+function anyPieceCanReach(color, targetRow, targetCol, isAnchorSquare = false) {
   for (let r = 0; r < BOARD_SIZE; r++) {
     for (let c = 0; c < BOARD_SIZE; c++) {
       let p = board[r][c];
       if (!p || p.color !== color) continue;
-      if (pieceCanReachSquare(p, targetRow, targetCol)) return true;
+      if (pieceCanReachSquare(p, targetRow, targetCol, isAnchorSquare)) return true;
     }
   }
   return false;
 }
 
-function pieceCanReachSquare(piece, tr, tc) {
+function pieceCanReachSquare(piece, tr, tc, isAnchorSquare = false) {
   // Use standard moves only (no anchors), respecting blockers
+  if (piece.type === 'P') {
+    let dir = piece.color === 'white' ? -1 : 1;
+    let dr = tr - piece.row;
+    let dc = tc - piece.col;
+    // diagonal capture or anchor reach
+    if (dr === dir && Math.abs(dc) === 1) {
+      let targetPiece = board[tr][tc];
+      if (targetPiece && targetPiece.color !== piece.color) return true;
+      if (isAnchorSquare) return true;
+      return false;
+    }
+    // single forward move
+    if (dc === 0 && dr === dir && !board[tr][tc]) return true;
+    // double forward from start if clear
+    let startRow = piece.color === 'white' ? 6 : 1;
+    if (dc === 0 && dr === 2 * dir && piece.row === startRow) {
+      let midRow = piece.row + dir;
+      if (!board[midRow][tc] && !board[tr][tc]) return true;
+    }
+    return false;
+  }
+
   let moves = getStandardMoves(piece);
   for (let m of moves) {
     if (m.row === tr && m.col === tc) {
       if (piece.type === 'P' && m.captureOnly) {
-        // require enemy piece present
+        // require enemy piece present unless we're evaluating reach to an anchor square
         let targetPiece = board[tr][tc];
         if (targetPiece && targetPiece.color !== piece.color) return true;
+        if (isAnchorSquare) return true;
         continue;
       }
       return true;
@@ -1580,9 +1702,59 @@ function pieceCanReachSquare(piece, tr, tc) {
   return false;
 }
 
+function activeAnchorCount(color) {
+  let count = 0;
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      if (anchored[r][c] === color) count++;
+    }
+  }
+  return count;
+}
+
 function refundAnchor(owner) {
   if (!owner) return;
   anchorPool[owner] = Math.min(4, (anchorPool[owner] || 0) + 1);
+}
+
+function drawHelpModal() {
+  fill(0, 180);
+  rect(0, 0, width, height);
+  let w = 360;
+  let h = 320;
+  let x = (width - w) / 2;
+  let y = (height - h) / 2;
+  fill(40);
+  stroke(255);
+  rect(x, y, w, h, 8);
+  fill(255);
+  noStroke();
+  textAlign(LEFT, TOP);
+  textSize(14);
+  text("Rules", x + 12, y + 12);
+  textSize(12);
+  let body = [
+    "On your turn, choose one action:",
+    "1) Create Anchor: Place an anchor on an empty square your pieces can legally reach (max 4 active).",
+    "2) Remove Anchor: Remove one of your anchors to refund it.",
+    "3) Flip Enemy Anchor: If you can legally move to an opponent anchor, flip it without moving.",
+    "4) Relay Move: If a piece can reach one of your anchors, it may make one extra legal move from that anchor this turn.",
+    "5) Regular Move: Any normal chess move (castling, en passant included).",
+    "6) Anchor Blocking: If a piece occupies an anchor or no friendly pieces can reach it, it is removed and refunded.",
+    "7) King Safety: If an anchor would allow a relay capture of the king, the mover must stop on that anchor instead (gives check)."
+  ];
+  let ty = y + 32;
+  let maxWidth = w - 24;
+  for (let line of body) {
+    wrapText(line, x + 12, ty, maxWidth, 16);
+    ty += 16 * ceil(textWidth(line) / maxWidth) + 2;
+  }
+  // Close hint
+  fill(220);
+  rect(x + w - 60, y + h - 30, 48, 20, 4);
+  fill(0);
+  textAlign(CENTER, CENTER);
+  text("Close", x + w - 36, y + h - 20);
 }
 
 /* --- Castling helpers --- */
@@ -1638,6 +1810,93 @@ function simulateCastlingRook(b, color, destCol) {
     b[row][0] = null;
     b[row][3] = rook;
   }
+}
+
+function wrapText(str, x, y, maxWidth, lineHeight) {
+  let words = str.split(' ');
+  let line = '';
+  let ty = y;
+  for (let i = 0; i < words.length; i++) {
+    let testLine = line + words[i] + ' ';
+    let w = textWidth(testLine);
+    if (w > maxWidth && i > 0) {
+      text(line, x, ty);
+      line = words[i] + ' ';
+      ty += lineHeight;
+    } else {
+      line = testLine;
+    }
+  }
+  text(line, x, ty);
+  return ty + lineHeight;
+}
+
+function checkPromotion(piece) {
+  if (piece.type !== 'P') return false;
+  if ((piece.color === 'white' && piece.row === 0) ||
+      (piece.color === 'black' && piece.row === BOARD_SIZE - 1)) {
+    promotionPending = piece;
+    return true; // pause turn until promotion selected
+  }
+  return false;
+}
+
+function drawPromotionModal() {
+  fill(0, 180);
+  rect(0, 0, width, height);
+  let w = 260;
+  let h = 120;
+  let x = (width - w) / 2;
+  let y = (height - h) / 2;
+  fill(40);
+  stroke(255);
+  rect(x, y, w, h, 8);
+  fill(255);
+  noStroke();
+  textAlign(CENTER, TOP);
+  textSize(14);
+  text("Choose promotion", x + w / 2, y + 8);
+  let options = ['Q','R','B','N'];
+  let size = 40;
+  let gap = 10;
+  let totalW = options.length * size + (options.length - 1) * gap;
+  let startX = x + (w - totalW) / 2;
+  for (let i = 0; i < options.length; i++) {
+    let px = startX + i * (size + gap);
+    fill(80);
+    rect(px, y + 36, size, size, 6);
+    drawSpriteAt(options[i], promotionPending.color, px + 4, y + 40, size - 8);
+  }
+}
+
+function handlePromotionClick(mx, my) {
+  if (!promotionPending) return false;
+  let w = 260;
+  let h = 120;
+  let x = (width - w) / 2;
+  let y = (height - h) / 2;
+  let options = ['Q','R','B','N'];
+  let size = 40;
+  let gap = 10;
+  let totalW = options.length * size + (options.length - 1) * gap;
+  let startX = x + (w - totalW) / 2;
+  for (let i = 0; i < options.length; i++) {
+    let px = startX + i * (size + gap);
+    let py = y + 36;
+    if (mx >= px && mx <= px + size && my >= py && my <= py + size) {
+      applyPromotion(options[i]);
+      return true;
+    }
+  }
+  return false;
+}
+
+function applyPromotion(newType) {
+  if (!promotionPending) return;
+  promotionPending.type = newType;
+  logAction(promotionPending, promotionPending.row, promotionPending.col, 'promote');
+  promotionPending = null;
+  endTurn();
 }
 
 </script>
