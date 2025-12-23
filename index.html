@@ -62,6 +62,10 @@ let showModal = false;
 let modalJustOpened = false;
 let promotionPending = null;
 let lastMoveSquare = null;
+let botActive = false;
+let botSide = null;
+let botTimer = null;
+let botWhiteBtn, botBlackBtn;
 let socket = null;
 let roomCode = getRoomFromURL();
 let playerName = getPlayerName();
@@ -359,7 +363,7 @@ function drawUIOverlay() {
   text("You: " + playerName + (playerColor ? " (" + playerColor + ")" : ""), sidebarX, 30);
   let modeText = anchorMode ? "Anchor Mode (space to switch)" : "Move Mode (space to switch)";
   let turnText = "Turn: " + (currentPlayer === 'white' ? whiteName : blackName);
-  const buttonBlockBottom = BUTTON_Y + BUTTON_H * 2;
+  const buttonBlockBottom = BUTTON_Y + BUTTON_H * 4 + BUTTON_GAP * 3;
   text(turnText, sidebarX, buttonBlockBottom + 10);
   // Mode label sits beneath the mode image
   const modeTextY = MODE_IMG_Y + MODE_IMG_H + 6;
@@ -518,12 +522,28 @@ function setupUIButtons() {
   resetBtn = createButton('Restart');
   resetBtn.position(sidebarX, btnY + btnH + gap);
   resetBtn.size(btnW, btnH);
-  resetBtn.mousePressed(initGame);
+  resetBtn.mousePressed(() => {
+    if (botActive) {
+      startBotGame(playerColor || 'white');
+    } else {
+      initGame();
+    }
+  });
   helpBtn = createButton('How to play?');
   helpBtn.position(sidebarX + btnW + gap, btnY + btnH + gap);
   helpBtn.size(btnW, btnH);
   helpBtn.mousePressed(() => { showModal = true; modalJustOpened = true; });
-  [undoBtn, redoBtn, resetBtn, helpBtn].forEach(btn => {
+  const fullW = SIDEBAR_WIDTH - 20;
+  const botY = btnY + (btnH + gap) * 2;
+  botWhiteBtn = createButton('Play Bot (you White)');
+  botWhiteBtn.position(sidebarX, botY);
+  botWhiteBtn.size(fullW, btnH);
+  botWhiteBtn.mousePressed(() => startBotGame('white'));
+  botBlackBtn = createButton('Play Bot (you Black)');
+  botBlackBtn.position(sidebarX, botY + btnH + gap);
+  botBlackBtn.size(fullW, btnH);
+  botBlackBtn.mousePressed(() => startBotGame('black'));
+  [undoBtn, redoBtn, resetBtn, helpBtn, botWhiteBtn, botBlackBtn].forEach(btn => {
     btn.style('font-size', '12px');
     btn.style('padding', '4px 6px');
     btn.style('border-radius', '6px');
@@ -574,6 +594,7 @@ function handleSocketMessage(event) {
     console.warn("Non-JSON message from server");
     return;
   }
+  if (botActive) return;
 
   if (msg.type === "joined") {
     clientId = msg.clientId || clientId;
@@ -601,7 +622,7 @@ function handleSocketMessage(event) {
 }
 
 function broadcastState(reason = "update") {
-  if (suppressNetworkSync) return;
+  if (suppressNetworkSync || botActive) return;
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   const payload = {
     type: "state",
@@ -768,6 +789,7 @@ function endTurn() {
   anchorMode = false;
   updateModeImage();
   recordHistory();
+  queueBotMove();
 }
 
 /* --- Legal target generation --- */
@@ -1140,10 +1162,10 @@ function getAnchorSummary() {
 }
 
 function drawMoveLog() {
-  let logHeight = 160;
+  let logHeight = 110;
   let logWidth = SIDEBAR_WIDTH - 20;
   let x = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
-  let y = BUTTON_Y + BUTTON_H * 2 + BUTTON_GAP + 24;
+  let y = BUTTON_Y + BUTTON_H * 4 + BUTTON_GAP * 3 + 16;
   fill(0, 180);
   noStroke();
   rect(x, y, logWidth, logHeight, 6);
@@ -1221,6 +1243,82 @@ function drawCapturedRow(list, color, x, y, deltaDisplay, maxWidth) {
     textSize(12);
     text(`+${deltaDisplay}`, x, y + size + 6);
   }
+}
+
+/* --- Bot opponent --- */
+
+function startBotGame(humanColor) {
+  botActive = true;
+  botSide = humanColor === 'white' ? 'black' : 'white';
+  playerColor = humanColor;
+  if (botTimer) {
+    clearTimeout(botTimer);
+    botTimer = null;
+  }
+  initGame();
+  whiteName = humanColor === 'white' ? playerName : "Bot";
+  blackName = humanColor === 'black' ? playerName : "Bot";
+  updateModeImage();
+  currentPlayer = 'white';
+  queueBotMove();
+}
+
+function queueBotMove() {
+  if (!botActive) return;
+  if (currentPlayer !== botSide) return;
+  if (botTimer) clearTimeout(botTimer);
+  botTimer = setTimeout(botMove, 200);
+}
+
+function collectAllLegalMoves(color) {
+  const prevSelected = selectedPiece;
+  const prevTargets = legalTargets;
+  const prevAnchor = anchorMode;
+  let moves = [];
+  anchorMode = false;
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      let p = board[r][c];
+      if (!p || p.color !== color) continue;
+      selectedPiece = p;
+      computeLegalTargets();
+      for (let t of legalTargets) {
+        if (t.type === 'move' || t.type === 'relay') {
+          moves.push({ piece: p, target: t });
+        }
+      }
+    }
+  }
+  selectedPiece = prevSelected;
+  legalTargets = prevTargets;
+  anchorMode = prevAnchor;
+  return moves;
+}
+
+function scoreMove(move) {
+  let { piece, target } = move;
+  let targetPiece = board[target.row][target.col];
+  let captureScore = targetPiece ? (PIECE_VALUE[targetPiece.type] || 0) : 0;
+  let promotionBonus = (piece.type === 'P' && (target.row === 0 || target.row === BOARD_SIZE - 1)) ? 8 : 0;
+  let randomNudge = Math.random() * 0.1;
+  return captureScore + promotionBonus + randomNudge;
+}
+
+function botMove() {
+  if (!botActive || currentPlayer !== botSide) return;
+  let moves = collectAllLegalMoves(botSide);
+  if (!moves.length) return;
+  moves.sort((a, b) => scoreMove(b) - scoreMove(a));
+  let best = moves[0];
+  anchorMode = false;
+  selectedPiece = best.piece;
+  if (best.target.type === 'relay') {
+    doRelayMove(best.piece, best.target.row, best.target.col);
+  } else {
+    doMove(best.piece, best.target.row, best.target.col);
+  }
+  selectedPiece = null;
+  legalTargets = [];
 }
 
 function logAction(piece, destRow, destCol, kind, capturedPiece = null, path = null) {
@@ -1692,6 +1790,7 @@ function undoMove() {
   historyIndex -= 1;
   applySnapshot(history[historyIndex]);
   broadcastState("undo");
+  queueBotMove();
 }
 
 function redoMove() {
@@ -1699,6 +1798,7 @@ function redoMove() {
   historyIndex += 1;
   applySnapshot(history[historyIndex]);
   broadcastState("redo");
+  queueBotMove();
 }
 
 function cloneBoard(src) {
@@ -2009,8 +2109,16 @@ function checkPromotion(piece) {
   if (piece.type !== 'P') return false;
   if ((piece.color === 'white' && piece.row === 0) ||
       (piece.color === 'black' && piece.row === BOARD_SIZE - 1)) {
-    promotionPending = piece;
-    return true; // pause turn until promotion selected
+    if (botActive && piece.color === botSide) {
+      piece.type = 'Q';
+      logAction(piece, piece.row, piece.col, 'promote');
+      promotionPending = null;
+      endTurn();
+      return true;
+    } else {
+      promotionPending = piece;
+      return true; // pause turn until promotion selected
+    }
   }
   return false;
 }
