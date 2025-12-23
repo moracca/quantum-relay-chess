@@ -320,11 +320,11 @@ function drawUIOverlay() {
   textAlign(LEFT, TOP);
   textSize(14);
   const sidebarX = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
-  text("Room: " + roomCode, sidebarX, 10);
-  text("You: " + playerName + (playerColor ? " (" + playerColor + ")" : ""), sidebarX, 28);
+  text("Room: " + roomCode, sidebarX, 12);
+  text("You: " + playerName + (playerColor ? " (" + playerColor + ")" : ""), sidebarX, 30);
   let modeText = anchorMode ? "Anchor Mode (space to switch)" : "Move Mode (space to switch)";
   let turnText = "Turn: " + (currentPlayer === 'white' ? whiteName : blackName);
-  text(turnText, sidebarX, 70);
+  text(turnText, sidebarX, 98);
   // Mode label sits beneath the mode image
   const modeTextY = MODE_IMG_Y + MODE_IMG_H + 6;
   text(modeText, sidebarX, modeTextY);
@@ -465,20 +465,34 @@ function keyPressed() {
 }
 
 function setupUIButtons() {
-  const btnX = BOARD_ORIGIN_X + BOARD_PIXELS + 30;
-  const btnY = 20;
+  const btnX = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
+  const btnY = 46;
+  const btnW = 90;
+  const btnH = 26;
   undoBtn = createButton('⟵ Back');
   undoBtn.position(btnX, btnY);
+  undoBtn.size(btnW, btnH);
   undoBtn.mousePressed(undoMove);
   redoBtn = createButton('Forward ⟶');
-  redoBtn.position(btnX + 80, btnY);
+  redoBtn.position(btnX + btnW + 8, btnY);
+  redoBtn.size(btnW, btnH);
   redoBtn.mousePressed(redoMove);
   resetBtn = createButton('Restart');
-  resetBtn.position(btnX, btnY + 26);
+  resetBtn.position(btnX, btnY + btnH + 8);
+  resetBtn.size(btnW, btnH);
   resetBtn.mousePressed(initGame);
   helpBtn = createButton('How to play?');
-  helpBtn.position(btnX + 70, btnY + 26);
+  helpBtn.position(btnX + btnW + 8, btnY + btnH + 8);
+  helpBtn.size(btnW, btnH);
   helpBtn.mousePressed(() => { showModal = true; modalJustOpened = true; });
+  [undoBtn, redoBtn, resetBtn, helpBtn].forEach(btn => {
+    btn.style('font-size', '12px');
+    btn.style('padding', '4px 6px');
+    btn.style('border-radius', '6px');
+    btn.style('border', '1px solid #999');
+    btn.style('background', '#f4f4f4');
+    btn.style('cursor', 'pointer');
+  });
   const modeImgX = BOARD_ORIGIN_X + BOARD_PIXELS + 17;
 
   modeImg = createImg('movemode.png', 'mode toggle');
