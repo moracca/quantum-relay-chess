@@ -59,6 +59,13 @@ let showModal = false;
 let modalJustOpened = false;
 let promotionPending = null;
 let lastMoveSquare = null;
+let socket = null;
+let roomCode = getRoomFromURL();
+let playerName = getPlayerName();
+let playerColor = null;
+let clientId = null;
+let peerList = [];
+let suppressNetworkSync = false;
 
 const PIECE_VALUE = { P:1, N:3, B:3, R:5, Q:9, K:0 };
 
@@ -84,6 +91,7 @@ function setup() {
   tileSize = BOARD_PIXELS / BOARD_SIZE;
   initGame();
   setupUIButtons();
+  setupMultiplayer();
 }
 
 function initGame() {
@@ -311,13 +319,16 @@ function drawUIOverlay() {
   fill(255);
   textAlign(LEFT, TOP);
   textSize(14);
+  const sidebarX = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
+  text("Room: " + roomCode, sidebarX, 10);
+  text("You: " + playerName + (playerColor ? " (" + playerColor + ")" : ""), sidebarX, 28);
   let modeText = anchorMode ? "Anchor Mode (space to switch)" : "Move Mode (space to switch)";
   let turnText = "Turn: " + (currentPlayer === 'white' ? whiteName : blackName);
-  text(turnText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, 70);
+  text(turnText, sidebarX, 70);
   // Mode label sits beneath the mode image
   const modeTextY = MODE_IMG_Y + MODE_IMG_H + 6;
-  text(modeText, BOARD_ORIGIN_X + BOARD_PIXELS + 10, modeTextY);
-  drawAnchorPoolIcons(BOARD_ORIGIN_X + BOARD_PIXELS + 10, modeTextY + 18);
+  text(modeText, sidebarX, modeTextY);
+  drawAnchorPoolIcons(sidebarX, modeTextY + 18);
 
   drawMoveLog();
   drawCapturedDrawer();
@@ -478,6 +489,126 @@ function setupUIButtons() {
     updateModeImage();
     if (selectedPiece) computeLegalTargets();
   });
+}
+
+/* --- Multiplayer (WebSocket) --- */
+
+function setupMultiplayer() {
+  if (socket) return;
+  const protocol = (window.location.protocol === "https:") ? "wss" : "ws";
+  const wsURL = protocol + "://" + window.location.host;
+  try {
+    socket = new WebSocket(wsURL);
+  } catch (err) {
+    console.warn("WebSocket unavailable", err);
+    return;
+  }
+
+  socket.addEventListener("open", () => {
+    socket.send(JSON.stringify({ type: "join", room: roomCode, name: playerName }));
+  });
+
+  socket.addEventListener("message", handleSocketMessage);
+  socket.addEventListener("close", () => { playerColor = null; });
+  socket.addEventListener("error", () => {});
+}
+
+function handleSocketMessage(event) {
+  let msg;
+  try {
+    msg = JSON.parse(event.data);
+  } catch (err) {
+    console.warn("Non-JSON message from server");
+    return;
+  }
+
+  if (msg.type === "joined") {
+    clientId = msg.clientId || clientId;
+    playerColor = msg.color || null;
+    peerList = msg.players || peerList;
+    if (msg.state) {
+      applyRemoteState(msg.state);
+    } else {
+      broadcastState("seed");
+    }
+    return;
+  }
+
+  if (msg.type === "players") {
+    peerList = msg.players || [];
+    return;
+  }
+
+  if (msg.type === "state") {
+    if (msg.state) {
+      applyRemoteState(msg.state);
+    }
+    return;
+  }
+}
+
+function broadcastState(reason = "update") {
+  if (suppressNetworkSync) return;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  const payload = {
+    type: "state",
+    room: roomCode,
+    reason,
+    state: serializeCurrentState()
+  };
+  socket.send(JSON.stringify(payload));
+}
+
+function applyRemoteState(state) {
+  if (!state) return;
+  suppressNetworkSync = true;
+  applySnapshot(state);
+  history = [serializeCurrentState()];
+  historyIndex = 0;
+  suppressNetworkSync = false;
+}
+
+function serializeCurrentState() {
+  return {
+    board: cloneBoard(board),
+    anchored: cloneAnchored(anchored),
+    captured: {
+      white: captured.white.map(p => ({ type: p.type, color: p.color })),
+      black: captured.black.map(p => ({ type: p.type, color: p.color }))
+    },
+    currentPlayer,
+    moveLog: [...moveLog],
+    anchorMode,
+    enPassantTarget: enPassantTarget ? { ...enPassantTarget } : null,
+    anchorPool: { ...anchorPool },
+    lastMoveSquare: lastMoveSquare ? { ...lastMoveSquare } : null
+  };
+}
+
+function getRoomFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  const fromParam = params.get("room");
+  const hashRoom = window.location.hash ? window.location.hash.replace("#", "") : "";
+  const room = (fromParam || hashRoom || "lobby").trim().slice(0, 64);
+  return room || "lobby";
+}
+
+function getPlayerName() {
+  const params = new URLSearchParams(window.location.search);
+  const fromParam = params.get("name");
+  let stored = null;
+  try {
+    stored = window.localStorage.getItem("qrc-player-name");
+  } catch (err) {
+    stored = null;
+  }
+  const name = (fromParam || stored || ("Player-" + Math.floor(Math.random() * 1000))).slice(0, 32);
+  try {
+    window.localStorage.setItem("qrc-player-name", name);
+  } catch (err) {
+    // ignore storage issues
+  }
+  return name;
 }
 
 /* --- Move / Anchor / Relay logic --- */
@@ -1477,22 +1608,10 @@ function recordHistory() {
   if (historyIndex < history.length - 1) {
     history = history.slice(0, historyIndex + 1);
   }
-  let snapshot = {
-    board: cloneBoard(board),
-    anchored: cloneAnchored(anchored),
-    captured: {
-      white: captured.white.map(p => ({ type: p.type, color: p.color })),
-      black: captured.black.map(p => ({ type: p.type, color: p.color }))
-    },
-    currentPlayer,
-    moveLog: [...moveLog],
-    anchorMode,
-    enPassantTarget: enPassantTarget ? { ...enPassantTarget } : null,
-    anchorPool: { ...anchorPool },
-    lastMoveSquare: lastMoveSquare ? { ...lastMoveSquare } : null
-  };
+  let snapshot = serializeCurrentState();
   history.push(snapshot);
   historyIndex = history.length - 1;
+  broadcastState("history");
 }
 
 function applySnapshot(snap) {
@@ -1519,12 +1638,14 @@ function undoMove() {
   if (historyIndex <= 0) return;
   historyIndex -= 1;
   applySnapshot(history[historyIndex]);
+  broadcastState("undo");
 }
 
 function redoMove() {
   if (historyIndex >= history.length - 1) return;
   historyIndex += 1;
   applySnapshot(history[historyIndex]);
+  broadcastState("redo");
 }
 
 function cloneBoard(src) {
