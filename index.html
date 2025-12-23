@@ -67,6 +67,30 @@ let clientId = null;
 let peerList = [];
 let suppressNetworkSync = false;
 
+function isFlipped() {
+  return playerColor === "black";
+}
+
+function toScreenCoords(row, col) {
+  const displayRow = isFlipped() ? BOARD_SIZE - 1 - row : row;
+  const displayCol = isFlipped() ? BOARD_SIZE - 1 - col : col;
+  return {
+    x: BOARD_ORIGIN_X + displayCol * tileSize,
+    y: BOARD_ORIGIN_Y + displayRow * tileSize
+  };
+}
+
+function screenToBoard(mouseX, mouseY) {
+  let col = floor((mouseX - BOARD_ORIGIN_X) / tileSize);
+  let row = floor((mouseY - BOARD_ORIGIN_Y) / tileSize);
+  if (isFlipped()) {
+    col = BOARD_SIZE - 1 - col;
+    row = BOARD_SIZE - 1 - row;
+  }
+  if (col < 0 || col >= BOARD_SIZE || row < 0 || row >= BOARD_SIZE) return null;
+  return { row, col };
+}
+
 const PIECE_VALUE = { P:1, N:3, B:3, R:5, Q:9, K:0 };
 
 class Piece {
@@ -174,7 +198,8 @@ function drawBoard() {
       if (light) fill(240);
       else fill(100, 130, 180);
       noStroke();
-      rect(BOARD_ORIGIN_X + c * tileSize, BOARD_ORIGIN_Y + r * tileSize, tileSize, tileSize);
+      let sc = toScreenCoords(r, c);
+      rect(sc.x, sc.y, tileSize, tileSize);
     }
   }
 }
@@ -186,7 +211,8 @@ function drawAnchoredSquares() {
       if (!p) continue;
       let img = p === 'white' ? anchorWhiteImg : anchorBlackImg;
       if (img) {
-        image(img, BOARD_ORIGIN_X + c * tileSize, BOARD_ORIGIN_Y + r * tileSize, tileSize, tileSize);
+        let sc = toScreenCoords(r, c);
+        image(img, sc.x, sc.y, tileSize, tileSize);
       }
     }
   }
@@ -218,10 +244,11 @@ function drawSprite(piece, r, c) {
   let sh = spriteSheet.height / SPRITE_ROWS;
   let sx = sxIdx * sw;
   let sy = syIdx * sh;
+  let sc = toScreenCoords(r, c);
   image(
     spriteSheet,
-    BOARD_ORIGIN_X + c * tileSize,
-    BOARD_ORIGIN_Y + r * tileSize,
+    sc.x,
+    sc.y,
     tileSize,
     tileSize,
     sx,
@@ -253,9 +280,10 @@ function drawHighlights() {
     noFill();
     stroke(255, 255, 0);
     strokeWeight(4);
+    let sc = toScreenCoords(selectedPiece.row, selectedPiece.col);
     rect(
-      BOARD_ORIGIN_X + selectedPiece.col * tileSize,
-      BOARD_ORIGIN_Y + selectedPiece.row * tileSize,
+      sc.x,
+      sc.y,
       tileSize,
       tileSize
     );
@@ -263,21 +291,22 @@ function drawHighlights() {
 
   // Highlight legal target squares
   for (let t of legalTargets) {
+    let sc = toScreenCoords(t.row, t.col);
     if (t.type === 'move') {
       noFill();
       stroke(0, 255, 0);
       strokeWeight(3);
-      rect(BOARD_ORIGIN_X + t.col * tileSize, BOARD_ORIGIN_Y + t.row * tileSize, tileSize, tileSize);
+      rect(sc.x, sc.y, tileSize, tileSize);
     } else if (t.type === 'relay') {
       noFill();
       stroke(255, 165, 0);
       strokeWeight(3);
-      rect(BOARD_ORIGIN_X + t.col * tileSize, BOARD_ORIGIN_Y + t.row * tileSize, tileSize, tileSize);
+      rect(sc.x, sc.y, tileSize, tileSize);
     } else if (t.type === 'anchor') {
       noFill();
       stroke(0, 200, 255);
       strokeWeight(3);
-      rect(BOARD_ORIGIN_X + t.col * tileSize, BOARD_ORIGIN_Y + t.row * tileSize, tileSize, tileSize);
+      rect(sc.x, sc.y, tileSize, tileSize);
     }
   }
 }
@@ -286,9 +315,10 @@ function drawLastMoveHighlight() {
   if (!lastMoveSquare) return;
   noStroke();
   fill(255, 250, 180, 180);
+  let sc = toScreenCoords(lastMoveSquare.row, lastMoveSquare.col);
   rect(
-    BOARD_ORIGIN_X + lastMoveSquare.col * tileSize,
-    BOARD_ORIGIN_Y + lastMoveSquare.row * tileSize,
+    sc.x,
+    sc.y,
     tileSize,
     tileSize
   );
@@ -299,14 +329,16 @@ function drawCoordinates() {
   noStroke();
   textAlign(CENTER, BOTTOM);
   textSize(12);
-  for (let c = 0; c < BOARD_SIZE; c++) {
-    let file = String.fromCharCode("a".charCodeAt(0) + c);
-    text(file, BOARD_ORIGIN_X + c * tileSize + tileSize / 2, BOARD_ORIGIN_Y + BOARD_PIXELS + LABEL_MARGIN - 4);
+  for (let displayCol = 0; displayCol < BOARD_SIZE; displayCol++) {
+    let col = isFlipped() ? BOARD_SIZE - 1 - displayCol : displayCol;
+    let file = String.fromCharCode("a".charCodeAt(0) + col);
+    text(file, BOARD_ORIGIN_X + displayCol * tileSize + tileSize / 2, BOARD_ORIGIN_Y + BOARD_PIXELS + LABEL_MARGIN - 4);
   }
   textAlign(RIGHT, CENTER);
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    let rank = (BOARD_SIZE - r).toString();
-    text(rank, BOARD_ORIGIN_X - 4, BOARD_ORIGIN_Y + r * tileSize + tileSize / 2);
+  for (let displayRow = 0; displayRow < BOARD_SIZE; displayRow++) {
+    let row = isFlipped() ? BOARD_SIZE - 1 - displayRow : displayRow;
+    let rank = (BOARD_SIZE - row).toString();
+    text(rank, BOARD_ORIGIN_X - 4, BOARD_ORIGIN_Y + displayRow * tileSize + tileSize / 2);
   }
 }
 
@@ -380,14 +412,9 @@ function mousePressed() {
     legalTargets = [];
     return;
   }
-  let col = floor((mouseX - BOARD_ORIGIN_X) / tileSize);
-  let row = floor((mouseY - BOARD_ORIGIN_Y) / tileSize);
-  if (
-    col < 0 || col >= BOARD_SIZE ||
-    row < 0 || row >= BOARD_SIZE
-  ) {
-    return;
-  }
+  let boardPos = screenToBoard(mouseX, mouseY);
+  if (!boardPos) return;
+  let { row, col } = boardPos;
 
   let clickedPiece = board[row][col];
   // In anchor mode: allow clicking existing friendly anchor to remove it and refund.
