@@ -34,9 +34,9 @@ const BOARD_ORIGIN_Y = LABEL_MARGIN;
 const MODE_IMG_Y = 320;
 const MODE_IMG_W = 180;
 const MODE_IMG_H = 120;
-const BUTTON_Y = 46;
+const BUTTON_Y = 56;
 const BUTTON_H = 26;
-const BUTTON_GAP = 10;
+const BUTTON_GAP = 8;
 let tileSize;
 let spriteSheet;
 let board;        // [row][col] = piece or null
@@ -359,7 +359,7 @@ function drawUIOverlay() {
   text("You: " + playerName + (playerColor ? " (" + playerColor + ")" : ""), sidebarX, 30);
   let modeText = anchorMode ? "Anchor Mode (space to switch)" : "Move Mode (space to switch)";
   let turnText = "Turn: " + (currentPlayer === 'white' ? whiteName : blackName);
-  const buttonBlockBottom = BUTTON_Y + BUTTON_H * 2 + BUTTON_GAP;
+  const buttonBlockBottom = BUTTON_Y + BUTTON_H * 2;
   text(turnText, sidebarX, buttonBlockBottom + 10);
   // Mode label sits beneath the mode image
   const modeTextY = MODE_IMG_Y + MODE_IMG_H + 6;
@@ -1140,7 +1140,7 @@ function getAnchorSummary() {
 }
 
 function drawMoveLog() {
-  let logHeight = 200;
+  let logHeight = 160;
   let logWidth = SIDEBAR_WIDTH - 20;
   let x = BOARD_ORIGIN_X + BOARD_PIXELS + 10;
   let y = BUTTON_Y + BUTTON_H * 2 + BUTTON_GAP + 24;
